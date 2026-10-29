@@ -71,6 +71,12 @@ func ServeNode(n *raft.Node) Handler {
 				return nil, err
 			}
 			return r, nil
+		case raft.InstallSnapshotArgs:
+			r, err := n.InstallSnapshot(m)
+			if err != nil {
+				return nil, err
+			}
+			return r, nil
 		default:
 			return nil, fmt.Errorf("%w: %T", ErrUnsupportedRPC, msg)
 		}
@@ -90,6 +96,12 @@ func (a typed) RequestVote(ctx context.Context, to raft.Peer, args raft.RequestV
 
 func (a typed) AppendEntries(ctx context.Context, to raft.Peer, args raft.AppendEntriesArgs) (raft.AppendEntriesReply, error) {
 	return call[raft.AppendEntriesReply](ctx, a.t, to.ID, args)
+}
+
+// InstallSnapshot makes the adapter a raft.SnapshotTransport, which nodes with
+// log compaction enabled require.
+func (a typed) InstallSnapshot(ctx context.Context, to raft.Peer, args raft.InstallSnapshotArgs) (raft.InstallSnapshotReply, error) {
+	return call[raft.InstallSnapshotReply](ctx, a.t, to.ID, args)
 }
 
 func call[T raft.RPC](ctx context.Context, t Transport, peerID string, req raft.RPC) (T, error) {

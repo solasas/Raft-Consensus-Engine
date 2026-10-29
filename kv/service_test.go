@@ -43,6 +43,14 @@ func (t memTransport) RequestVote(_ context.Context, to raft.Peer, a raft.Reques
 	return n.RequestVote(a)
 }
 
+func (t memTransport) InstallSnapshot(_ context.Context, to raft.Peer, a raft.InstallSnapshotArgs) (raft.InstallSnapshotReply, error) {
+	n, err := t.net.route(t.self, to.ID)
+	if err != nil {
+		return raft.InstallSnapshotReply{}, err
+	}
+	return n.InstallSnapshot(a)
+}
+
 func (t memTransport) AppendEntries(_ context.Context, to raft.Peer, a raft.AppendEntriesArgs) (raft.AppendEntriesReply, error) {
 	n, err := t.net.route(t.self, to.ID)
 	if err != nil {
@@ -56,7 +64,11 @@ type cluster struct {
 	svcs map[string]*Service
 }
 
-func newCluster(t *testing.T, ids ...string) *cluster {
+func newCluster(t *testing.T, ids ...string) *cluster { return newClusterWith(t, nil, ids...) }
+
+// newClusterWith lets a test adjust each node's raft.Config (e.g. the snapshot
+// threshold) before the node is built.
+func newClusterWith(t *testing.T, tweak func(*raft.Config), ids ...string) *cluster {
 	t.Helper()
 	c := &cluster{
 		net:  &memNet{svcs: map[string]*Service{}, down: map[string]bool{}},
@@ -70,10 +82,14 @@ func newCluster(t *testing.T, ids ...string) *cluster {
 				peers = append(peers, raft.Peer{ID: o, Addr: o + ":7000"})
 			}
 		}
-		svc, err := NewService(raft.Config{
+		cfg := raft.Config{
 			ID: id, Peers: peers, Logger: quiet,
 			Transport: memTransport{net: c.net, self: id},
-		})
+		}
+		if tweak != nil {
+			tweak(&cfg)
+		}
+		svc, err := NewService(cfg)
 		if err != nil {
 			t.Fatal(err)
 		}

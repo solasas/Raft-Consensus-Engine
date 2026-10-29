@@ -20,16 +20,25 @@ type Service struct {
 
 // NewService builds a node whose committed entries feed a fresh Store. Any
 // cfg.ApplyCh is replaced.
+//
+// Log compaction is on: the store is the node's Snapshotter, so the log is
+// snapshotted once it exceeds cfg.SnapshotThreshold entries (default 1024). That
+// requires cfg.Storage (nil is fine: in-memory) to implement raft.SnapshotStorage
+// and cfg.Transport to implement raft.SnapshotTransport.
 func NewService(cfg raft.Config) (*Service, error) {
+	store := NewStore()
 	ch := make(chan raft.ApplyMsg, 256)
 	cfg.ApplyCh = ch
+	if cfg.Snapshotter == nil {
+		cfg.Snapshotter = store
+	}
 	node, err := raft.NewNode(cfg)
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Service{
-		node: node, store: NewStore(), applyCh: ch,
+		node: node, store: store, applyCh: ch,
 		ctx: ctx, cancel: cancel, done: make(chan struct{}),
 	}, nil
 }

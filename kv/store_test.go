@@ -60,8 +60,8 @@ func TestStoreSkipsMalformedCommands(t *testing.T) {
 	if got := s.AppliedIndex(); got != 4 {
 		t.Errorf("AppliedIndex = %d, want 4 (bad commands still consume their index)", got)
 	}
-	if want := map[string]string{"ok": "yes"}; !reflect.DeepEqual(s.Snapshot(), want) {
-		t.Errorf("state = %v, want %v", s.Snapshot(), want)
+	if want := map[string]string{"ok": "yes"}; !reflect.DeepEqual(s.Dump(), want) {
+		t.Errorf("state = %v, want %v", s.Dump(), want)
 	}
 }
 
@@ -76,8 +76,8 @@ func TestStoreIsDeterministic(t *testing.T) {
 		a.Apply(m)
 		b.Apply(m)
 	}
-	if !reflect.DeepEqual(a.Snapshot(), b.Snapshot()) || a.AppliedIndex() != b.AppliedIndex() {
-		t.Errorf("replicas diverged: %v vs %v", a.Snapshot(), b.Snapshot())
+	if !reflect.DeepEqual(a.Dump(), b.Dump()) || a.AppliedIndex() != b.AppliedIndex() {
+		t.Errorf("replicas diverged: %v vs %v", a.Dump(), b.Dump())
 	}
 }
 
