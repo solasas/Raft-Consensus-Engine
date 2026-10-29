@@ -28,6 +28,7 @@ func newTestNet(t *testing.T, opts Options, ids ...string) *testNet {
 		hits: map[string]*atomic.Int64{},
 	}
 	n.chaos = NewChaos(n.sw)
+	t.Cleanup(n.sw.Close) // drop any messages still delayed in flight
 	for _, id := range ids {
 		hits := new(atomic.Int64)
 		n.hits[id] = hits
@@ -191,12 +192,14 @@ func TestLatencyIsInjectedOnBothLegs(t *testing.T) {
 	}
 }
 
-func TestLatencyRespectsContext(t *testing.T) {
+// The caller stops waiting at its deadline, but the packet is already on the
+// wire: it still arrives and executes later, and only its reply is wasted.
+func TestDelayedMessageStillArrivesAfterCallerTimesOut(t *testing.T) {
 	n := newTestNet(t, Options{}, "a", "b")
-	if err := n.chaos.SetLatency("a", "b", 2*time.Second, 2*time.Second); err != nil {
+	if err := n.chaos.SetLatency("a", "b", 150*time.Millisecond, 150*time.Millisecond); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 
 	start := time.Now()
@@ -204,11 +207,29 @@ func TestLatencyRespectsContext(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want DeadlineExceeded", err)
 	}
-	if time.Since(start) > time.Second {
-		t.Errorf("SendRPC held the caller for %v despite a 50ms deadline", time.Since(start))
+	if time.Since(start) > 120*time.Millisecond {
+		t.Errorf("SendRPC held the caller for %v despite a 30ms deadline", time.Since(start))
 	}
-	if n.hits["b"].Load() != 0 {
-		t.Error("request was delivered even though it never left the delay")
+	if got := n.hits["b"].Load(); got != 0 {
+		t.Fatalf("request executed after %v, before its 150ms delay elapsed", time.Since(start))
+	}
+
+	eventually(t, "the late request to reach b", func() bool { return n.hits["b"].Load() == 1 })
+}
+
+func TestCloseDiscardsMessagesInFlight(t *testing.T) {
+	n := newTestNet(t, Options{}, "a", "b")
+	if err := n.chaos.SetLatency("a", "b", 200*time.Millisecond, 200*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	n.tr["a"].SendRPC(ctx, "b", raft.RequestVoteArgs{Term: 1}) // times out; message still in flight
+
+	n.sw.Close()
+	time.Sleep(300 * time.Millisecond)
+	if got := n.hits["b"].Load(); got != 0 {
+		t.Errorf("message was delivered %d times after Close", got)
 	}
 }
 

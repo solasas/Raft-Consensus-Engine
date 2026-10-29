@@ -2,8 +2,11 @@ package transport
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"math/rand"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,6 +23,24 @@ type LinkPolicy struct {
 	DropRate   float64       // probability in [0,1] that a message is lost
 	MinLatency time.Duration // delay is uniform in [MinLatency, MaxLatency]
 	MaxLatency time.Duration
+}
+
+// String summarises the active faults, e.g. "drop=30% latency=100ms-500ms".
+func (p LinkPolicy) String() string {
+	var parts []string
+	if p.Blocked {
+		parts = append(parts, "blocked")
+	}
+	if p.DropRate > 0 {
+		parts = append(parts, fmt.Sprintf("drop=%.4g%%", p.DropRate*100))
+	}
+	if p.MaxLatency > 0 || p.MinLatency > 0 {
+		parts = append(parts, fmt.Sprintf("latency=%v-%v", p.MinLatency, p.MaxLatency))
+	}
+	if len(parts) == 0 {
+		return "ok"
+	}
+	return strings.Join(parts, " ")
 }
 
 type Direction uint8
@@ -42,7 +63,7 @@ const (
 	OutcomeDelivered Outcome = iota // passed the switch
 	OutcomeBlocked
 	OutcomeDropped
-	OutcomeCanceled // caller's context ended while the message was in flight
+	OutcomeCanceled // the switch was closed while the message was in flight
 )
 
 func (o Outcome) String() string {
@@ -69,12 +90,22 @@ type Options struct {
 	SilentDrops bool
 }
 
+// errSilent marks a lost message in SilentDrops mode: nobody is told.
+var errSilent = errors.New("transport: message lost silently")
+
 // Switch is the central switch matrix. Every message between simulated nodes
 // passes through route(), which consults the policy of the directed link it is
 // crossing. A chaos engine (see Chaos) mutates the matrix at runtime; the data
 // path only ever reads it.
+//
+// A message in flight is independent of the caller that sent it: if the caller
+// gives up (its context expires) while the message is still being delayed, the
+// message is still delivered later, as on a real network. That is what lets
+// latency faults produce stale, reordered RPCs and not just losses.
 type Switch struct {
-	opts Options
+	opts   Options
+	ctx    context.Context // cancelled by Close: ends every in-flight message
+	cancel context.CancelFunc
 
 	mu       sync.RWMutex
 	def      LinkPolicy // applies to any link without an explicit entry
@@ -92,14 +123,20 @@ func NewSwitch(opts Options) *Switch {
 	if seed == 0 {
 		seed = time.Now().UnixNano()
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Switch{
 		opts:     opts,
+		ctx:      ctx,
+		cancel:   cancel,
 		links:    make(map[Link]LinkPolicy),
 		members:  make(map[string]struct{}),
 		handlers: make(map[string]Handler),
 		rng:      rand.New(rand.NewSource(seed)),
 	}
 }
+
+// Close discards every message still in flight. Call it when the test is over.
+func (s *Switch) Close() { s.cancel() }
 
 // Register attaches the receiving side of node id to the switch.
 func (s *Switch) Register(id string, h Handler) {
@@ -149,6 +186,13 @@ func (s *Switch) Link(from, to string) LinkPolicy {
 	if p, ok := s.links[Link{from, to}]; ok {
 		return p
 	}
+	return s.def
+}
+
+// Default returns the policy used by links with no explicit entry.
+func (s *Switch) Default() LinkPolicy {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.def
 }
 
@@ -223,16 +267,11 @@ func (s *Switch) handler(id string) Handler {
 	return s.handlers[id]
 }
 
-// route carries one RPC: request leg, delivery via next, reply leg. The two legs
-// are judged independently against the matrix, each on its own direction, so a
-// one-way fault yields the realistic "request arrived and was executed, but the
-// caller never heard back" case.
+// route carries one RPC on behalf of a caller. The journey runs in its own
+// goroutine, so the caller can stop waiting (context expiry) without stopping
+// the message.
 func (s *Switch) route(ctx context.Context, from, to string, msg raft.RPC,
 	next func(context.Context) (raft.RPC, error)) (raft.RPC, error) {
-
-	if err := s.leg(ctx, from, to, msg, DirRequest); err != nil {
-		return nil, err
-	}
 
 	type result struct {
 		resp raft.RPC
@@ -240,47 +279,62 @@ func (s *Switch) route(ctx context.Context, from, to string, msg raft.RPC,
 	}
 	done := make(chan result, 1)
 	go func() {
-		r, e := next(ctx)
-		done <- result{r, e}
+		resp, err := s.carry(ctx, from, to, msg, next)
+		if errors.Is(err, errSilent) {
+			return // lost without a trace: the caller only ever sees its own timeout
+		}
+		done <- result{resp, err}
 	}()
-	var res result
+
 	select {
-	case res = <-done:
+	case r := <-done:
+		return r.resp, r.err
 	case <-ctx.Done():
-		// The request was delivered; the handler may still run to completion.
 		return nil, ctx.Err()
 	}
-	if res.err != nil {
-		return nil, res.err
-	}
-	if res.resp == nil {
-		return nil, ErrBadResponse
-	}
+}
 
-	if err := s.leg(ctx, to, from, res.resp, DirResponse); err != nil {
+// carry is the full round trip: request leg, delivery via next, reply leg. The
+// legs are judged independently against the matrix, each on its own direction,
+// so a one-way fault yields the realistic "request arrived and was executed,
+// but the caller never heard back" case.
+func (s *Switch) carry(ctx context.Context, from, to string, msg raft.RPC,
+	next func(context.Context) (raft.RPC, error)) (raft.RPC, error) {
+
+	if err := s.leg(from, to, msg, DirRequest); err != nil {
 		return nil, err
 	}
-	return res.resp, nil
+	resp, err := next(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil {
+		return nil, ErrBadResponse
+	}
+	if err := s.leg(to, from, resp, DirResponse); err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 // leg subjects one message to the policy of the directed link it crosses.
-func (s *Switch) leg(ctx context.Context, from, to string, msg raft.RPC, dir Direction) error {
+func (s *Switch) leg(from, to string, msg raft.RPC, dir Direction) error {
 	p := s.Link(from, to)
 	ev := Event{From: from, To: to, Kind: msg.RPCName(), Dir: dir}
 
 	if p.Blocked {
 		ev.Outcome = OutcomeBlocked
 		s.emit(ev)
-		return s.lose(ctx, ErrBlocked)
+		return s.lose(ErrBlocked)
 	}
 	if p.DropRate > 0 && s.roll() < p.DropRate {
 		ev.Outcome = OutcomeDropped
 		s.emit(ev)
-		return s.lose(ctx, ErrDropped)
+		return s.lose(ErrDropped)
 	}
 
 	ev.Delay = s.jitter(p)
-	if err := sleep(ctx, ev.Delay); err != nil {
+	if err := s.sleep(ev.Delay); err != nil {
 		ev.Outcome = OutcomeCanceled
 		s.emit(ev)
 		return err
@@ -290,10 +344,9 @@ func (s *Switch) leg(ctx context.Context, from, to string, msg raft.RPC, dir Dir
 	return nil
 }
 
-func (s *Switch) lose(ctx context.Context, err error) error {
+func (s *Switch) lose(err error) error {
 	if s.opts.SilentDrops {
-		<-ctx.Done()
-		return ctx.Err()
+		return errSilent
 	}
 	return err
 }
@@ -322,17 +375,18 @@ func (s *Switch) jitter(p LinkPolicy) time.Duration {
 	return p.MinLatency + time.Duration(s.rng.Int63n(int64(p.MaxLatency-p.MinLatency)+1))
 }
 
-func sleep(ctx context.Context, d time.Duration) error {
+// sleep waits out an injected delay, ending early only if the switch is closed.
+func (s *Switch) sleep(d time.Duration) error {
 	if d <= 0 {
-		return ctx.Err()
+		return s.ctx.Err()
 	}
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
 	case <-t.C:
 		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-s.ctx.Done():
+		return s.ctx.Err()
 	}
 }
 
@@ -344,6 +398,13 @@ type SimulatedTransport struct {
 	inner Transport
 }
 
+// SendRPC sends msg to peerID through the switch. It returns when the reply
+// arrives or ctx ends, whichever is first; a message still in flight when ctx
+// ends is delivered anyway and its reply discarded.
+//
+// With an inner transport, the inner call is made with the caller's ctx, so it
+// is abandoned if the caller has already given up by the time the (delayed)
+// message reaches it.
 func (t *SimulatedTransport) SendRPC(ctx context.Context, peerID string, msg raft.RPC) (raft.RPC, error) {
 	var next func(context.Context) (raft.RPC, error)
 	if t.inner != nil {

@@ -2,6 +2,7 @@ package transport
 
 import (
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -130,6 +131,22 @@ func (c *Chaos) SetDropRate(from, to string, rate float64) error {
 	return nil
 }
 
+// SetNodeDropRate loses the given fraction of messages on every link into and
+// out of node id.
+func (c *Chaos) SetNodeDropRate(id string, rate float64) error {
+	if err := checkRate(rate); err != nil {
+		return err
+	}
+	for _, m := range c.sw.Members() {
+		if m == id {
+			continue
+		}
+		c.sw.UpdateLink(id, m, func(p *LinkPolicy) { p.DropRate = rate })
+		c.sw.UpdateLink(m, id, func(p *LinkPolicy) { p.DropRate = rate })
+	}
+	return nil
+}
+
 // SetGlobalDropRate loses the given fraction of messages on every link.
 func (c *Chaos) SetGlobalDropRate(rate float64) error {
 	if err := checkRate(rate); err != nil {
@@ -137,6 +154,34 @@ func (c *Chaos) SetGlobalDropRate(rate float64) error {
 	}
 	c.sw.UpdateAll(func(p *LinkPolicy) { p.DropRate = rate })
 	return nil
+}
+
+// ---- introspection ----
+
+// Faults lists every link that is currently misbehaving, one line each and in a
+// stable order, for test logs: "n1->n3: blocked", "default: drop=15%".
+func (c *Chaos) Faults() []string {
+	var out []string
+	if d := c.sw.Default(); d != (LinkPolicy{}) {
+		out = append(out, "default: "+d.String())
+	}
+	snap := c.sw.Snapshot()
+	links := make([]Link, 0, len(snap))
+	for l, p := range snap {
+		if p != c.sw.Default() && p != (LinkPolicy{}) {
+			links = append(links, l)
+		}
+	}
+	sort.Slice(links, func(i, j int) bool {
+		if links[i].From != links[j].From {
+			return links[i].From < links[j].From
+		}
+		return links[i].To < links[j].To
+	})
+	for _, l := range links {
+		out = append(out, fmt.Sprintf("%s->%s: %s", l.From, l.To, snap[l]))
+	}
+	return out
 }
 
 func checkLatency(min, max time.Duration) error {
