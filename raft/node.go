@@ -45,6 +45,11 @@ type Config struct {
 	SnapshotThreshold int           // compact once the in-memory log exceeds this many entries; default 1024
 	SnapshotTimeout   time.Duration // per InstallSnapshot RPC; default 5s
 
+	// OnEvent, if set, is called synchronously from the node's run loop for each
+	// notable transition (see EventKind). It must return quickly and must not call
+	// back into the node: hand the event to a channel and return.
+	OnEvent func(Event)
+
 	Logger *slog.Logger // nil => slog.Default()
 }
 
@@ -166,6 +171,7 @@ type Node struct {
 	snapRPCs      chan snapRPC
 	snapResults   chan snapResult
 	compactDone   chan compactResult
+	inspectReqs   chan inspectReq
 
 	applyQ *applyQueue
 
@@ -213,6 +219,10 @@ type (
 		args  InstallSnapshotArgs
 		reply InstallSnapshotReply
 		err   error
+	}
+	inspectReq struct {
+		tail  int
+		reply chan Inspection
 	}
 	// compactResult is the state machine's answer to a snapshot request.
 	compactResult struct {
@@ -287,6 +297,7 @@ func NewNode(cfg Config) (*Node, error) {
 		snapRPCs:      make(chan snapRPC, 16),
 		snapResults:   make(chan snapResult, 16),
 		compactDone:   make(chan compactResult, 4),
+		inspectReqs:   make(chan inspectReq, 8),
 		applyQ:        newApplyQueue(),
 		ctx:           ctx,
 		cancel:        cancel,
@@ -394,6 +405,23 @@ func (n *Node) Propose(cmd []byte) (index, term uint64, err error) {
 	}
 }
 
+// Inspect returns the node's status together with, on a leader, its replication
+// progress per follower, and the last `tail` log entries it still holds.
+func (n *Node) Inspect(tail int) (Inspection, error) {
+	req := inspectReq{tail: tail, reply: make(chan Inspection, 1)}
+	select {
+	case n.inspectReqs <- req:
+	case <-n.ctx.Done():
+		return Inspection{}, ErrStopped
+	}
+	select {
+	case r := <-req.reply:
+		return r, nil
+	case <-n.ctx.Done():
+		return Inspection{}, ErrStopped
+	}
+}
+
 // Status returns a consistent snapshot of the node's state.
 func (n *Node) Status() (Status, error) {
 	reply := make(chan Status, 1)
@@ -454,6 +482,9 @@ func (n *Node) run() {
 		case res := <-n.compactDone:
 			n.handleCompactResult(res)
 
+		case req := <-n.inspectReqs:
+			req.reply <- n.inspect(req.tail)
+
 		case p := <-n.proposals:
 			p.reply <- n.handlePropose(p.cmd)
 		case reply := <-n.statusReqs:
@@ -502,6 +533,7 @@ func (n *Node) becomeFollower(term uint64) {
 	wasLeader := n.state == Leader
 	if n.state != Follower {
 		n.logger.Info("became follower", "term", n.currentTerm, "from", n.state.String())
+		n.emit(EventFollower, "stepped down from "+n.state.String())
 	}
 	n.state = Follower
 	n.votesGranted = nil
@@ -524,6 +556,7 @@ func (n *Node) startElection() {
 	n.persist() // term+vote must be durable before asking for votes
 	n.resetElectionTimer()
 	n.logger.Info("starting election", "term", n.currentTerm)
+	n.emit(EventCandidate, "election timeout, requesting votes")
 
 	if n.quorum() <= 1 { // single-node cluster
 		n.becomeLeader()
@@ -542,10 +575,12 @@ func (n *Node) startElection() {
 }
 
 func (n *Node) becomeLeader() {
+	votes := len(n.votesGranted)
 	n.state = Leader
 	n.leaderID = n.id
 	n.votesGranted = nil
 	n.logger.Info("became leader", "term", n.currentTerm)
+	n.emit(EventLeader, fmt.Sprintf("won with %d of %d votes", votes, len(n.peers)+1))
 
 	// Leaders don't time out.
 	if !n.electionTimer.Stop() {
@@ -595,6 +630,7 @@ func (n *Node) handleRequestVote(a RequestVoteArgs) RequestVoteReply {
 		n.persist()
 		n.resetElectionTimer() // granting a vote counts as hearing from a viable leader
 		n.logger.Info("granted vote", "term", n.currentTerm, "to", a.CandidateID)
+		n.emit(EventVote, "voted for "+a.CandidateID)
 		return RequestVoteReply{Term: n.currentTerm, VoteGranted: true}
 	}
 	return RequestVoteReply{Term: n.currentTerm}
@@ -986,6 +1022,7 @@ func (n *Node) compactTo(index uint64, data []byte) {
 
 	n.persistSnapshot()
 	n.logger.Info("compacted log", "snapshotIndex", index, "retained", len(n.log)-1)
+	n.emit(EventCompact, fmt.Sprintf("log folded into a snapshot through index %d", index))
 }
 
 // handleInstallSnapshot is the follower side (Raft paper Figure 13, for a
@@ -1021,6 +1058,7 @@ func (n *Node) handleInstallSnapshot(a InstallSnapshotArgs) InstallSnapshotReply
 	// the snapshot last and ends in exactly the snapshot's state.
 	n.applyQ.push([]ApplyMsg{{Snapshot: a.Data, SnapshotIndex: a.LastIncludedIndex, SnapshotTerm: a.LastIncludedTerm}})
 	n.logger.Info("installed snapshot", "index", a.LastIncludedIndex, "from", a.LeaderID)
+	n.emit(EventInstall, fmt.Sprintf("installed %s's snapshot through index %d", a.LeaderID, a.LastIncludedIndex))
 	return InstallSnapshotReply{Term: n.currentTerm}
 }
 
@@ -1116,6 +1154,31 @@ func (n *Node) termAt(idx uint64) uint64  { return n.log[idx-n.snapIndex].Term }
 
 func (n *Node) lastLog() (index, term uint64) {
 	return n.lastIndex(), n.log[len(n.log)-1].Term
+}
+
+// emit reports a notable transition to Config.OnEvent, if one is set.
+func (n *Node) emit(kind EventKind, detail string) {
+	if n.cfg.OnEvent == nil {
+		return
+	}
+	n.cfg.OnEvent(Event{At: time.Now(), Node: n.id, Kind: kind, Term: n.currentTerm, Detail: detail})
+}
+
+// inspect builds an Inspection on the run loop. Entries are copied; their
+// Command slices are shared, which is safe because commands are never mutated.
+func (n *Node) inspect(tail int) Inspection {
+	in := Inspection{Status: n.status()}
+	if n.state == Leader {
+		for _, p := range n.peers {
+			in.Peers = append(in.Peers, PeerProgress{
+				ID: p.ID, Match: n.matchIndex[p.ID], Next: n.nextIndex[p.ID], Snapshotting: n.snapInFlight[p.ID],
+			})
+		}
+	}
+	if count := min(max(tail, 0), len(n.log)-1); count > 0 {
+		in.Tail = append([]LogEntry(nil), n.log[len(n.log)-count:]...)
+	}
+	return in
 }
 
 // persist writes hard state + log. Raft's safety depends on this being durable

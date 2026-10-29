@@ -1,0 +1,662 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Raft Control Room</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --surface: #ffffff; --surface2: #eef0f4; --text: #1c2230; --muted: #667085; --border: #d3d8e0;
+    --leader: #c98a00; --leader-bg: #fff4d1; --cand: #2563eb; --cand-bg: #dbe8ff;
+    --ok: #1a9d55; --bad: #d92d3a; --warn: #e07b00; --accent: #4f46e5;
+    --snap: #8b95a7; --commit: #1a9d55; --uncommit: #9ad9b4;
+    --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 1px 3px rgba(16, 24, 40, .1);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f131a; --surface: #171c26; --surface2: #202736; --text: #e6e9f0; --muted: #98a2b3; --border: #2e3647;
+      --leader: #f2b629; --leader-bg: #3a2f10; --cand: #6ea0ff; --cand-bg: #172a52;
+      --ok: #3ccf7e; --bad: #ff6b76; --warn: #ffa042; --accent: #8b87ff;
+      --snap: #5d677b; --commit: #3ccf7e; --uncommit: #2a6a49;
+      --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 12px 20px; background: var(--surface); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 5; }
+  h1 { font-size: 17px; margin: 0; letter-spacing: .2px; }
+  h2 { font-size: 13px; margin: 0 0 10px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); }
+  h3 { font-size: 12px; margin: 14px 0 6px; color: var(--muted); font-weight: 600; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; background: var(--surface2); font-size: 12px; font-weight: 600; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .live .dot { background: var(--ok); } .down .dot { background: var(--bad); } .connecting .dot { background: var(--warn); }
+  #stats { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 13px; margin-left: auto; }
+  #stats b { color: var(--text); }
+  #alert { display: none; background: var(--bad); color: #fff; padding: 6px 20px; font-weight: 600; }
+  #alert.on { display: block; }
+
+  main { display: grid; gap: 16px; padding: 16px 20px 40px; max-width: 1500px; margin: 0 auto;
+    grid-template-columns: minmax(0, 1.45fr) minmax(300px, 1fr);
+    grid-template-areas: "graph side" "repl feed" "logs feed"; }
+  @media (max-width: 980px) { main { grid-template-columns: 1fr; grid-template-areas: "graph" "side" "repl" "logs" "feed"; } }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; box-shadow: var(--shadow); min-width: 0; }
+  .graph { grid-area: graph; } .side { grid-area: side; display: grid; gap: 16px; align-content: start; }
+  .repl { grid-area: repl; } .logs { grid-area: logs; } .feed { grid-area: feed; display: flex; flex-direction: column; max-height: 880px; }
+
+  /* ---- network graph ---- */
+  svg#net { width: 100%; height: auto; max-height: 560px; display: block; user-select: none; }
+  .hit { stroke: transparent; stroke-width: 22; cursor: pointer; pointer-events: stroke; }
+  .wire { stroke-width: 3; pointer-events: none; transition: stroke .25s; }
+  .edge.ok .wire { stroke: var(--ok); opacity: .55; }
+  .edge.deg .wire { stroke: var(--warn); stroke-dasharray: 2 5; stroke-linecap: round; }
+  .edge.half .wire { stroke: var(--warn); stroke-dasharray: 8 6; }
+  .edge.sev .wire { stroke: var(--bad); stroke-dasharray: 3 8; stroke-linecap: round; opacity: .9; }
+  .edge.flow .wire { stroke-dasharray: 7 7; animation: dash .9s linear infinite; opacity: .85; }
+  .edge.sel .wire { stroke-width: 6; }
+  .edge:hover .wire { stroke-width: 5; }
+  .arrow { fill: var(--ok); pointer-events: none; opacity: .8; }
+  .arrow.bad { fill: var(--bad); }
+  .edge-label { font-size: 11px; fill: var(--warn); text-anchor: middle; pointer-events: none; font-weight: 600; }
+  @keyframes dash { to { stroke-dashoffset: -14; } }
+  @keyframes pulse { 0%, 100% { opacity: .15; } 50% { opacity: .8; } }
+
+  .node { cursor: pointer; }
+  .node .halo { fill: none; stroke: transparent; stroke-width: 5; }
+  .node .body { fill: var(--surface2); stroke: var(--border); stroke-width: 2.5; transition: fill .25s, stroke .25s; }
+  .node text { text-anchor: middle; fill: var(--text); pointer-events: none; }
+  .node .nid { font-size: 17px; font-weight: 700; } .node .nterm { font-size: 12px; } .node .nrole { font-size: 9.5px; letter-spacing: .7px; fill: var(--muted); font-weight: 700; }
+  .node.leader .body { fill: var(--leader-bg); stroke: var(--leader); stroke-width: 4; }
+  .node.leader .halo { stroke: var(--leader); opacity: .3; }
+  .node.candidate .body { fill: var(--cand-bg); stroke: var(--cand); stroke-width: 3.5; }
+  .node.candidate .halo { stroke: var(--cand); animation: pulse 1s ease-in-out infinite; }
+  .node.stale .halo { stroke: var(--bad); stroke-dasharray: 5 4; opacity: 1; animation: none; }
+  .node .nflag { font-size: 10.5px; font-weight: 700; letter-spacing: .6px; fill: var(--bad); }
+  .node.isolated .body { stroke-dasharray: 6 5; }
+  .node.sel .body { stroke: var(--accent); stroke-width: 5; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .legend i { display: inline-block; width: 16px; height: 0; border-top: 3px solid; margin-right: 5px; vertical-align: middle; }
+
+  /* ---- controls ---- */
+  button { font: inherit; padding: 6px 12px; border-radius: 7px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button:active { transform: translateY(1px); }
+  button.danger { background: var(--bad); border-color: var(--bad); color: #fff; font-weight: 600; }
+  button.good { background: var(--ok); border-color: var(--ok); color: #fff; font-weight: 600; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .hint { color: var(--muted); }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 6px 0; }
+  .kv span:nth-child(odd) { color: var(--muted); }
+  .bad-text { color: var(--bad); font-weight: 700; } .ok-text { color: var(--ok); font-weight: 600; } .warn-text { color: var(--warn); font-weight: 600; }
+  label.row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+  label.row > span:first-child { min-width: 84px; color: var(--muted); }
+  input[type=range] { flex: 1; accent-color: var(--accent); }
+  input[type=text], select { font: inherit; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); min-width: 0; }
+  input[type=text] { width: 100%; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+  /* ---- replication bars ---- */
+  .rrow { display: grid; grid-template-columns: 74px 1fr; gap: 4px 12px; align-items: center; margin: 8px 0; }
+  .rrow .name { font-weight: 700; } .rrow .name small { font-weight: 600; color: var(--muted); display: block; font-size: 10px; letter-spacing: .5px; }
+  .rrow .nums { grid-column: 2; color: var(--muted); font-size: 12px; margin-top: -2px; }
+  .bar { position: relative; height: 16px; border-radius: 8px; background: var(--surface2); overflow: hidden; border: 1px solid var(--border); }
+  .seg { position: absolute; top: 0; bottom: 0; transition: left .35s ease, width .35s ease; }
+  .seg.snap { background: repeating-linear-gradient(45deg, var(--snap), var(--snap) 4px, transparent 4px, transparent 8px); }
+  .seg.commit { background: var(--commit); } .seg.unc { background: var(--uncommit); }
+  .seg.match { background: var(--accent); } .seg.next { width: 3px; background: var(--warn); }
+  .badge { display: inline-block; padding: 0 7px; border-radius: 5px; font-size: 11px; font-weight: 700; background: var(--surface2); color: var(--muted); }
+  .badge.snapping { background: var(--warn); color: #fff; }
+  .key { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+  .key i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 4px; vertical-align: -1px; }
+
+  /* ---- log tail ---- */
+  #logTail { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .chip { padding: 3px 9px; border-radius: 6px; border: 1.5px solid var(--border); border-left-width: 5px; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--surface2); }
+  .chip.unc { background: transparent; border-style: dashed; color: var(--muted); }
+  .chip.noop { opacity: .7; font-style: italic; }
+  .snapmark { padding: 3px 9px; border-radius: 6px; background: var(--snap); color: #fff; font-size: 12px; font-weight: 700; }
+
+  /* ---- event feed ---- */
+  #termStrip { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  #termStrip .pill { background: var(--leader-bg); color: var(--text); border: 1px solid var(--leader); }
+  #feed { list-style: none; margin: 0; padding: 0; overflow: auto; flex: 1; }
+  #feed li { display: grid; grid-template-columns: 82px auto 1fr; gap: 2px 8px; padding: 5px 0; border-bottom: 1px solid var(--border); align-items: baseline; }
+  #feed time { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  #feed .who { font-weight: 700; min-width: 28px; }
+  #feed .msg { color: var(--text); overflow-wrap: anywhere; }
+  .kind { display: inline-block; padding: 0 7px; border-radius: 5px; font-size: 11px; font-weight: 700; margin-right: 6px; color: #fff; background: var(--muted); }
+  .k-candidate { background: var(--cand); } .k-leader { background: var(--leader); } .k-follower { background: var(--muted); }
+  .k-vote { background: #8b5cf6; } .k-chaos { background: var(--bad); } .k-write-ok { background: var(--ok); }
+  .k-write-failed { background: var(--bad); } .k-write { background: #0e9aa7; } .k-compact { background: #0e9aa7; } .k-install-snapshot { background: var(--warn); }
+
+  #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--bad); color: #fff; padding: 8px 16px; border-radius: 8px; font-weight: 600; opacity: 0; pointer-events: none; transition: opacity .2s; max-width: 90vw; z-index: 20; }
+  #toast.on { opacity: 1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Raft Control Room</h1>
+  <span id="conn" class="pill connecting"><span class="dot"></span><span id="connText">connecting…</span></span>
+  <div id="stats"></div>
+</header>
+<div id="alert" role="alert"></div>
+
+<main>
+  <section class="card graph">
+    <h2>Network &mdash; click a link or a node</h2>
+    <svg id="net" viewBox="0 0 640 524" role="img" aria-label="Cluster network graph"></svg>
+    <div class="legend">
+      <span><i style="border-color:var(--ok)"></i>healthy</span>
+      <span><i style="border-color:var(--warn);border-top-style:dotted"></i>loss / latency</span>
+      <span><i style="border-color:var(--warn);border-top-style:dashed"></i>one way cut</span>
+      <span><i style="border-color:var(--bad);border-top-style:dotted"></i>severed</span>
+      <span>triangles show each direction</span>
+    </div>
+  </section>
+
+  <aside class="side">
+    <section class="card" id="selPanel"></section>
+
+    <section class="card">
+      <h2>Chaos</h2>
+      <div class="btns" style="margin-top:0">
+        <button id="bIsoLeader" class="danger">Isolate leader</button>
+        <button id="bSplit" class="danger">Split majority | minority</button>
+        <button id="bHeal" class="good">Heal partitions</button>
+        <button id="bReset">Reset network</button>
+      </div>
+      <label class="row"><span>Packet loss</span><input id="rDrop" type="range" min="0" max="50" step="5" value="0"><b id="vDrop">0%</b></label>
+      <label class="row"><span>Latency</span>
+        <select id="sLat">
+          <option value="0,0">none</option>
+          <option value="20,60">20&ndash;60 ms</option>
+          <option value="100,500">100&ndash;500 ms</option>
+          <option value="500,1500">500&ndash;1500 ms</option>
+        </select></label>
+    </section>
+
+    <section class="card">
+      <h2>Client writes</h2>
+      <div class="grid2">
+        <input id="iKey" type="text" value="color" maxlength="64" aria-label="key">
+        <input id="iVal" type="text" value="red" maxlength="256" aria-label="value">
+      </div>
+      <label class="row"><span>Send to</span><select id="sTarget"><option value="">current leader</option></select></label>
+      <div class="btns" style="margin-top:4px">
+        <button id="bPut" class="primary">Write</button>
+        <button id="bBurst">Burst &times;50</button>
+      </div>
+      <label class="row"><span>Background</span><input id="rLoad" type="range" min="0" max="50" step="5" value="0"><b id="vLoad">off</b></label>
+      <div class="hint">Write to a stale, isolated leader to watch an entry that can never commit.</div>
+    </section>
+  </aside>
+
+  <section class="card repl">
+    <h2>Log replication</h2>
+    <div class="key">
+      <span><i style="background:repeating-linear-gradient(45deg,var(--snap),var(--snap) 3px,transparent 3px,transparent 6px)"></i>snapshotted</span>
+      <span><i style="background:var(--commit)"></i>committed</span>
+      <span><i style="background:var(--uncommit)"></i>uncommitted</span>
+    </div>
+    <div id="repl"></div>
+    <h3 id="peersTitle">Leader's view of its followers</h3>
+    <div id="peers"></div>
+  </section>
+
+  <section class="card logs">
+    <h2 id="logTitle">Log</h2>
+    <div id="logTail"></div>
+  </section>
+
+  <section class="card feed">
+    <h2>Elections &amp; events</h2>
+    <div id="termStrip"></div>
+    <ul id="feed"></ul>
+  </section>
+</main>
+<div id="toast"></div>
+
+<script>
+(() => {
+'use strict';
+
+const $ = (id) => document.getElementById(id);
+const NS = 'http://www.w3.org/2000/svg';
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const pad = (n, w) => String(n).padStart(w, '0');
+
+const S = {
+  state: null,        // latest ClusterView
+  events: [],         // feed, ascending by seq
+  seen: new Set(),    // seq numbers already added
+  leaders: [],        // [{term, node}] from "leader" events
+  selLink: null,      // "a|b"
+  selNode: null,
+  feedVersion: 0, feedDrawn: -1,
+};
+
+// ---------------------------------------------------------------- transport
+function setConn(kind) {
+  $('conn').className = 'pill ' + kind;
+  $('connText').textContent = { live: 'live', down: 'disconnected, retrying…', connecting: 'connecting…' }[kind];
+}
+
+function connect() {
+  setConn('connecting');
+  const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  ws.onopen = () => setConn('live');
+  ws.onmessage = (m) => {
+    let msg;
+    try { msg = JSON.parse(m.data); } catch (e) { return; }
+    if (msg.type === 'hello') {
+      S.state = msg.state;
+      (msg.history || []).forEach(addEvent);
+    } else if (msg.type === 'state') {
+      S.state = msg.state;
+    } else if (msg.type === 'event') {
+      addEvent(msg.event);
+    }
+    schedule();
+  };
+  ws.onclose = () => { setConn('down'); setTimeout(connect, 1000); };
+  ws.onerror = () => ws.close();
+}
+
+async function api(path, body) {
+  try {
+    const r = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'raftviz' },
+      body: JSON.stringify(body || {}),
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      toast(j.error || r.statusText);
+    }
+  } catch (e) {
+    toast('request failed: ' + e.message);
+  }
+}
+
+let toastTimer = 0;
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('on');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('on'), 3500);
+}
+
+// ------------------------------------------------------------------- events
+function addEvent(ev) {
+  if (S.seen.has(ev.seq)) return;
+  S.seen.add(ev.seq);
+  S.events.push(ev);
+  if (S.events.length > 250) S.events.shift();
+  if (ev.kind === 'leader') {
+    S.leaders.push({ term: ev.term, node: ev.node });
+    if (S.leaders.length > 8) S.leaders.shift();
+  }
+  S.feedVersion++;
+}
+
+// --------------------------------------------------------------- rendering
+let queued = false;
+function schedule() {
+  if (queued) return;
+  queued = true;
+  requestAnimationFrame(() => { queued = false; render(); });
+}
+
+function render() {
+  const st = S.state;
+  if (!st || !st.nodes.length) return;
+  renderStats(st);
+  updateGraph(st);
+  renderSelection(st);
+  renderRepl(st);
+  renderPeers(st);
+  renderLog(st);
+  renderFeed();
+  syncControls(st);
+}
+
+const linkMap = (st) => { const m = {}; st.links.forEach((l) => { m[l.from + '>' + l.to] = l; }); return m; };
+
+function renderStats(st) {
+  const leader = st.nodes.find((n) => n.id === st.leader);
+  const leaders = st.nodes.filter((n) => n.state === 'Leader');
+  $('stats').innerHTML =
+    `<span>leader <b>${leader ? esc(leader.id) + ' (term ' + leader.term + ')' : 'none'}</b></span>` +
+    `<span>nodes <b>${st.nodes.length}</b></span>` +
+    `<span>writes committed <b>${st.writes}</b></span>` +
+    `<span>failed <b>${st.failed}</b></span>`;
+  const alert = $('alert');
+  if (leaders.length > 1) {
+    alert.textContent = 'SPLIT BRAIN: ' + leaders.map((n) => n.id + ' (term ' + n.term + ')').join(' and ') +
+      ' both believe they are leader. Only the highest term can commit.';
+    alert.classList.add('on');
+  } else if (!leaders.length) {
+    alert.textContent = 'No leader: the cluster cannot accept writes until an election succeeds.';
+    alert.classList.add('on');
+  } else {
+    alert.classList.remove('on');
+  }
+}
+
+// ---- network graph --------------------------------------------------------
+const NODE_R = 36, CX = 320, CY = 262, RING = 190;
+let geo = null;
+
+function mk(tag, attrs, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+
+function triangle(px, py, ux, uy) {
+  const nx = -uy, ny = ux;
+  return [[px + ux * 8, py + uy * 8], [px - ux * 6 + nx * 5, py - uy * 6 + ny * 5], [px - ux * 6 - nx * 5, py - uy * 6 - ny * 5]]
+    .map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
+}
+
+function buildGraph(ids) {
+  const svg = $('net');
+  svg.innerHTML = '';
+  geo = { ids: ids.slice(), pos: {}, edges: {}, nodes: {} };
+  const gEdges = mk('g', {}, svg), gNodes = mk('g', {}, svg);
+  ids.forEach((id, i) => {
+    const a = -Math.PI / 2 + (i * 2 * Math.PI) / ids.length;
+    geo.pos[id] = { x: CX + RING * Math.cos(a), y: CY + RING * Math.sin(a) };
+  });
+  for (let i = 0; i < ids.length; i++) {
+    for (let j = i + 1; j < ids.length; j++) {
+      const a = ids[i], b = ids[j], pa = geo.pos[a], pb = geo.pos[b];
+      const dx = pb.x - pa.x, dy = pb.y - pa.y, len = Math.hypot(dx, dy), ux = dx / len, uy = dy / len;
+      const gap = NODE_R + 8;
+      const x1 = pa.x + ux * gap, y1 = pa.y + uy * gap, x2 = pb.x - ux * gap, y2 = pb.y - uy * gap;
+      const key = a + '|' + b;
+      const g = mk('g', { class: 'edge ok' }, gEdges);
+      const wire = mk('line', { x1, y1, x2, y2, class: 'wire' }, g);
+      mk('line', { x1, y1, x2, y2, class: 'hit', 'data-pair': key }, g);
+      const arrAB = mk('polygon', { class: 'arrow', points: triangle(x1 + (x2 - x1) * 0.36, y1 + (y2 - y1) * 0.36, ux, uy) }, g);
+      const arrBA = mk('polygon', { class: 'arrow', points: triangle(x1 + (x2 - x1) * 0.64, y1 + (y2 - y1) * 0.64, -ux, -uy) }, g);
+      const label = mk('text', { x: (x1 + x2) / 2, y: (y1 + y2) / 2 - 8, class: 'edge-label' }, g);
+      geo.edges[key] = { g, wire, arrAB, arrBA, label, a, b };
+    }
+  }
+  ids.forEach((id) => {
+    const p = geo.pos[id];
+    const g = mk('g', { class: 'node follower', 'data-node': id, transform: 'translate(' + p.x + ',' + p.y + ')' }, gNodes);
+    mk('circle', { r: NODE_R + 8, class: 'halo' }, g);
+    mk('circle', { r: NODE_R, class: 'body' }, g);
+    mk('text', { class: 'nid', y: -7 }, g).textContent = id;
+    const term = mk('text', { class: 'nterm', y: 10 }, g);
+    const role = mk('text', { class: 'nrole', y: 25 }, g);
+    const flag = mk('text', { class: 'nflag', y: NODE_R + 20 }, g); // below the circle: too long to fit inside
+    geo.nodes[id] = { g, term, role, flag };
+  });
+}
+
+function updateGraph(st) {
+  const ids = st.nodes.map((n) => n.id);
+  if (!geo || geo.ids.join() !== ids.join()) buildGraph(ids);
+  const L = linkMap(st);
+
+  for (const key in geo.edges) {
+    const e = geo.edges[key], ab = L[e.a + '>' + e.b], ba = L[e.b + '>' + e.a];
+    if (!ab || !ba) continue;
+    const any = ab.blocked || ba.blocked, both = ab.blocked && ba.blocked;
+    const drop = Math.max(ab.dropRate, ba.dropRate), lat = Math.max(ab.maxLatencyMs, ba.maxLatencyMs);
+    const degraded = !any && (drop > 0 || lat > 0);
+    let cls = 'edge ' + (both ? 'sev' : any ? 'half' : degraded ? 'deg' : 'ok');
+    const flows = (st.leader === e.a && !ab.blocked) || (st.leader === e.b && !ba.blocked);
+    if (flows && !degraded && !both) cls += ' flow';
+    if (S.selLink === key) cls += ' sel';
+    e.g.setAttribute('class', cls);
+    e.arrAB.setAttribute('class', 'arrow' + (ab.blocked ? ' bad' : ''));
+    e.arrBA.setAttribute('class', 'arrow' + (ba.blocked ? ' bad' : ''));
+    const parts = [];
+    if (drop > 0) parts.push(Math.round(drop * 100) + '% loss');
+    if (lat > 0) parts.push(Math.round(lat) + ' ms');
+    e.label.textContent = parts.join(' · ');
+  }
+
+  st.nodes.forEach((n) => {
+    const g = geo.nodes[n.id];
+    if (!g) return;
+    const stale = n.state === 'Leader' && n.id !== st.leader;
+    const isolated = ids.every((o) => o === n.id || (L[n.id + '>' + o] && L[n.id + '>' + o].blocked && L[o + '>' + n.id] && L[o + '>' + n.id].blocked));
+    let cls = 'node ' + n.state.toLowerCase();
+    if (stale) cls += ' stale';
+    if (isolated) cls += ' isolated';
+    if (S.selNode === n.id) cls += ' sel';
+    g.g.setAttribute('class', cls);
+    g.term.textContent = 'term ' + n.term;
+    g.role.textContent = n.state.toUpperCase();
+    g.flag.textContent = [stale ? 'STALE LEADER' : '', isolated ? 'ISOLATED' : ''].filter(Boolean).join(' · ');
+  });
+}
+
+$('net').addEventListener('click', (ev) => {
+  const link = ev.target.closest('[data-pair]');
+  const node = ev.target.closest('[data-node]');
+  if (node) { S.selNode = node.getAttribute('data-node'); S.selLink = null; }
+  else if (link) { S.selLink = link.getAttribute('data-pair'); S.selNode = null; }
+  else { S.selLink = null; S.selNode = null; }
+  schedule();
+});
+
+// ---- selection panel ------------------------------------------------------
+function dirStatus(l) {
+  if (!l) return '?';
+  if (l.blocked) return '<span class="bad-text">BLOCKED</span>';
+  const bits = [];
+  if (l.dropRate > 0) bits.push(Math.round(l.dropRate * 100) + '% loss');
+  if (l.maxLatencyMs > 0) bits.push(Math.round(l.minLatencyMs) + '–' + Math.round(l.maxLatencyMs) + ' ms');
+  return bits.length ? '<span class="warn-text">' + bits.join(', ') + '</span>' : '<span class="ok-text">open</span>';
+}
+
+function renderSelection(st) {
+  const L = linkMap(st);
+  let html;
+  if (S.selLink) {
+    const [a, b] = S.selLink.split('|');
+    html = `<h2>Link ${esc(a)} ↔ ${esc(b)}</h2>
+      <div class="kv"><span>${esc(a)} → ${esc(b)}</span><span>${dirStatus(L[a + '>' + b])}</span>
+      <span>${esc(b)} → ${esc(a)}</span><span>${dirStatus(L[b + '>' + a])}</span></div>
+      <div class="btns">
+        <button class="danger" data-act="sever" data-a="${esc(a)}" data-b="${esc(b)}" data-both="1">Sever Network Link</button>
+        <button data-act="sever" data-a="${esc(a)}" data-b="${esc(b)}">Cut ${esc(a)} → ${esc(b)} only</button>
+        <button data-act="sever" data-a="${esc(b)}" data-b="${esc(a)}">Cut ${esc(b)} → ${esc(a)} only</button>
+        <button class="good" data-act="restore" data-a="${esc(a)}" data-b="${esc(b)}" data-both="1">Restore link</button>
+      </div>
+      <div class="hint" style="margin-top:8px">Cutting one direction is an asymmetric fault: requests get through but replies are lost.</div>`;
+  } else if (S.selNode) {
+    const n = st.nodes.find((x) => x.id === S.selNode);
+    html = `<h2>Node ${esc(S.selNode)}</h2>` + (n ? `<div class="kv">
+        <span>role</span><span><b>${esc(n.state)}</b></span>
+        <span>term</span><span>${n.term}</span>
+        <span>voted for</span><span>${esc(n.votedFor || '—')}</span>
+        <span>knows leader</span><span>${esc(n.leaderId || '—')}</span>
+        <span>keys stored</span><span>${n.keys}</span></div>` : '') + `
+      <div class="btns">
+        <button class="danger" data-act="isolate" data-a="${esc(S.selNode)}">Isolate node</button>
+        <button class="good" data-act="reconnect" data-a="${esc(S.selNode)}">Reconnect node</button>
+      </div>`;
+  } else {
+    html = `<h2>Selection</h2><div class="hint">Click a <b>link</b> between two nodes to sever it, or a <b>node</b> to isolate it and inspect its log.</div>`;
+  }
+  const panel = $('selPanel');
+  if (panel.dataset.html !== html) { panel.innerHTML = html; panel.dataset.html = html; }
+}
+
+$('selPanel').addEventListener('click', (ev) => {
+  const b = ev.target.closest('button[data-act]');
+  if (!b) return;
+  const a = b.dataset.a, o = b.dataset.b, both = b.dataset.both === '1';
+  switch (b.dataset.act) {
+    case 'sever': api('/api/links/sever', { from: a, to: o, both }); break;
+    case 'restore': api('/api/links/restore', { from: a, to: o, both }); break;
+    case 'isolate': api('/api/nodes/isolate', { id: a }); break;
+    case 'reconnect': api('/api/nodes/reconnect', { id: a }); break;
+  }
+});
+
+// ---- replication bars -----------------------------------------------------
+function ensureRows(container, ids, build) {
+  const key = ids.join();
+  if (container.dataset.key === key) return;
+  container.dataset.key = key;
+  container.innerHTML = '';
+  ids.forEach((id) => container.appendChild(build(id)));
+}
+
+function bar(...segs) {
+  return '<div class="bar">' + segs.map((s) => `<div class="seg ${s}"></div>`).join('') + '</div>';
+}
+
+function rowFor(id, barHtml) {
+  const d = document.createElement('div');
+  d.className = 'rrow';
+  d.dataset.id = id;
+  d.innerHTML = `<div class="name">${esc(id)}<small></small></div>${barHtml}<div class="nums"></div>`;
+  return d;
+}
+
+const pct = (v, max) => (max > 0 ? Math.min(100, (v / max) * 100) : 0).toFixed(2) + '%';
+function setSeg(row, cls, from, to, max) {
+  const s = row.querySelector('.seg.' + cls);
+  if (!s) return;
+  s.style.left = pct(from, max);
+  s.style.width = pct(Math.max(0, to - from), max);
+}
+
+function renderRepl(st) {
+  const c = $('repl');
+  ensureRows(c, st.nodes.map((n) => n.id), (id) => rowFor(id, bar('snap', 'commit', 'unc')));
+  const max = Math.max(1, ...st.nodes.map((n) => n.lastLogIndex));
+  st.nodes.forEach((n) => {
+    const row = c.querySelector('[data-id="' + n.id + '"]');
+    if (!row) return;
+    setSeg(row, 'snap', 0, n.snapshotIndex, max);
+    setSeg(row, 'commit', n.snapshotIndex, n.commitIndex, max);
+    setSeg(row, 'unc', Math.max(n.commitIndex, n.snapshotIndex), n.lastLogIndex, max);
+    row.querySelector('small').textContent = n.state.toUpperCase();
+    row.querySelector('.nums').textContent =
+      `last ${n.lastLogIndex} · committed ${n.commitIndex} · applied ${n.lastApplied} · snapshot ${n.snapshotIndex} · ${n.logEntries} in memory · ${n.keys} keys`;
+  });
+}
+
+function renderPeers(st) {
+  const c = $('peers');
+  const leader = st.nodes.find((n) => n.id === st.leader);
+  if (!leader || !leader.replication || !leader.replication.length) {
+    c.dataset.key = '';
+    c.innerHTML = '<div class="hint">No leader to report on.</div>';
+    return;
+  }
+  $('peersTitle').textContent = `${leader.id}'s view of its followers (match = confirmed replicated)`;
+  const ids = leader.replication.map((p) => p.id);
+  ensureRows(c, ids, (id) => rowFor(id, bar('snap', 'match', 'next')));
+  const max = Math.max(1, leader.lastLogIndex);
+  leader.replication.forEach((p) => {
+    const row = c.querySelector('[data-id="' + p.id + '"]');
+    if (!row) return;
+    setSeg(row, 'snap', 0, Math.min(p.match, leader.snapshotIndex), max);
+    setSeg(row, 'match', Math.min(p.match, leader.snapshotIndex), p.match, max);
+    const nx = row.querySelector('.seg.next');
+    nx.style.left = pct(Math.max(0, p.next - 1), max);
+    const behind = leader.lastLogIndex - p.match;
+    row.querySelector('small').textContent = 'FOLLOWER';
+    row.querySelector('.nums').innerHTML =
+      `match ${p.match} of ${leader.lastLogIndex} · ` + (behind > 0 ? `<b>${behind} behind</b>` : 'caught up') +
+      ` · next send #${p.next}` + (p.snapshotting ? ' <span class="badge snapping">installing snapshot</span>' : '');
+  });
+}
+
+// ---- log tail -------------------------------------------------------------
+function renderLog(st) {
+  const id = S.selNode || st.leader || st.nodes[0].id;
+  const n = st.nodes.find((x) => x.id === id) || st.nodes[0];
+  $('logTitle').textContent = `Log of ${n.id} — newest ${n.tail.length} of ${n.lastLogIndex} entries` + (S.selNode ? '' : ' (click a node to switch)');
+  let html = '';
+  if (n.snapshotIndex > 0) html += `<span class="snapmark">⟦ snapshot through #${n.snapshotIndex} ⟧</span>`;
+  if (!n.tail.length) html += '<span class="hint">empty</span>';
+  n.tail.forEach((e) => {
+    const hue = (e.term * 47) % 360;
+    html += `<span class="chip${e.committed ? '' : ' unc'}${e.noop ? ' noop' : ''}" style="border-left-color:hsl(${hue} 65% 52%)" title="term ${e.term}, ${e.committed ? 'committed' : 'NOT committed'}">#${e.index} <b>T${e.term}</b> ${esc(e.cmd)}</span>`;
+  });
+  const c = $('logTail');
+  if (c.dataset.html !== html) { c.innerHTML = html; c.dataset.html = html; }
+}
+
+// ---- event feed -----------------------------------------------------------
+function clock(ms) {
+  const d = new Date(ms);
+  return pad(d.getHours(), 2) + ':' + pad(d.getMinutes(), 2) + ':' + pad(d.getSeconds(), 2) + '.' + pad(d.getMilliseconds(), 3);
+}
+
+function renderFeed() {
+  if (S.feedDrawn === S.feedVersion) return;
+  S.feedDrawn = S.feedVersion;
+  $('termStrip').innerHTML = S.leaders.length
+    ? S.leaders.map((l) => `<span class="pill">term ${l.term} → ${esc(l.node)}</span>`).join('')
+    : '<span class="hint">no leader elected yet</span>';
+  const items = [];
+  for (let i = S.events.length - 1; i >= 0 && items.length < 120; i--) {
+    const e = S.events[i];
+    items.push(`<li><time>${clock(e.atMs)}</time><span class="who">${esc(e.node || '·')}</span>` +
+      `<span class="msg"><span class="kind k-${esc(e.kind)}">${esc(e.kind)}</span>${e.term ? 'T' + e.term + ' ' : ''}${esc(e.detail)}</span></li>`);
+  }
+  $('feed').innerHTML = items.join('');
+}
+
+// ---- controls -------------------------------------------------------------
+let lastTargets = '';
+function syncControls(st) {
+  const ids = st.nodes.map((n) => n.id).join();
+  if (ids !== lastTargets) {
+    lastTargets = ids;
+    const sel = $('sTarget'), cur = sel.value;
+    sel.innerHTML = '<option value="">current leader</option>' + st.nodes.map((n) => `<option value="${esc(n.id)}">${esc(n.id)}</option>`).join('');
+    sel.value = cur;
+  }
+  const drop = Math.max(0, ...st.links.map((l) => l.dropRate));
+  if (document.activeElement !== $('rDrop')) { $('rDrop').value = Math.round(drop * 100); $('vDrop').textContent = Math.round(drop * 100) + '%'; }
+  const maxLat = Math.max(0, ...st.links.map((l) => l.maxLatencyMs)), minLat = Math.max(0, ...st.links.map((l) => l.minLatencyMs));
+  if (document.activeElement !== $('sLat')) {
+    const want = Math.round(minLat) + ',' + Math.round(maxLat);
+    const opt = [...$('sLat').options].find((o) => o.value === want);
+    if (opt) $('sLat').value = want;
+  }
+  if (document.activeElement !== $('rLoad')) { $('rLoad').value = st.load; $('vLoad').textContent = st.load ? st.load + '/s' : 'off'; }
+}
+
+$('bIsoLeader').onclick = () => {
+  const leader = S.state && S.state.leader;
+  if (!leader) return toast('there is no leader to isolate');
+  api('/api/nodes/isolate', { id: leader });
+};
+$('bSplit').onclick = () => {
+  if (!S.state) return;
+  const ids = S.state.nodes.map((n) => n.id);
+  const minority = Math.floor(ids.length / 2);
+  api('/api/chaos/partition', { groups: [ids.slice(0, ids.length - minority), ids.slice(ids.length - minority)] });
+};
+$('bHeal').onclick = () => api('/api/chaos/heal');
+$('bReset').onclick = () => api('/api/chaos/reset');
+$('rDrop').oninput = () => { $('vDrop').textContent = $('rDrop').value + '%'; };
+$('rDrop').onchange = () => api('/api/chaos/drop', { rate: Number($('rDrop').value) / 100 });
+$('sLat').onchange = () => { const [mn, mx] = $('sLat').value.split(',').map(Number); api('/api/chaos/latency', { minMs: mn, maxMs: mx }); };
+$('bPut').onclick = () => api('/api/kv/put', { target: $('sTarget').value, key: $('iKey').value, value: $('iVal').value });
+$('bBurst').onclick = () => api('/api/kv/burst', { count: 50 });
+$('rLoad').oninput = () => { $('vLoad').textContent = Number($('rLoad').value) ? $('rLoad').value + '/s' : 'off'; };
+$('rLoad').onchange = () => api('/api/load', { rate: Number($('rLoad').value) });
+
+connect();
+})();
+</script>
+</body>
+</html>

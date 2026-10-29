@@ -207,6 +207,13 @@ func (s *Store) Get(key string) (string, bool) {
 	return v, ok
 }
 
+// Len is the number of keys currently stored.
+func (s *Store) Len() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.data)
+}
+
 // AppliedIndex is the highest raft index applied to the map.
 func (s *Store) AppliedIndex() uint64 {
 	s.mu.RLock()

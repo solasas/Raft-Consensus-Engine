@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // State is the role a node currently plays in the cluster.
@@ -192,6 +193,42 @@ func (e *NotLeaderError) Error() string {
 		return "raft: not the leader (leader unknown)"
 	}
 	return "raft: not the leader (leader is " + e.LeaderID + ")"
+}
+
+// EventKind names a notable thing that happened inside a node.
+type EventKind string
+
+const (
+	EventCandidate EventKind = "candidate"        // started an election
+	EventLeader    EventKind = "leader"           // won an election
+	EventFollower  EventKind = "follower"         // stepped down to follower
+	EventVote      EventKind = "vote"             // granted a vote
+	EventCompact   EventKind = "compact"          // compacted its log into a snapshot
+	EventInstall   EventKind = "install-snapshot" // installed a snapshot from the leader
+)
+
+// Event is delivered to Config.OnEvent. Term is the node's term after the event.
+type Event struct {
+	At     time.Time
+	Node   string
+	Kind   EventKind
+	Term   uint64
+	Detail string
+}
+
+// PeerProgress is a leader's view of one follower's replication.
+type PeerProgress struct {
+	ID           string
+	Match        uint64 // highest index known to be replicated on the follower
+	Next         uint64 // next index the leader will send
+	Snapshotting bool   // an InstallSnapshot is in flight to it
+}
+
+// Inspection is a read-only look inside a node, taken atomically by its run loop.
+type Inspection struct {
+	Status Status
+	Peers  []PeerProgress // only populated on a leader, in configuration order
+	Tail   []LogEntry     // the most recent entries still held in memory
 }
 
 // Status is a consistent snapshot of a node's volatile state.
