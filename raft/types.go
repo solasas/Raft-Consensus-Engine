@@ -85,6 +85,16 @@ type AppendEntriesReply struct {
 	ConflictTerm  uint64
 }
 
+// RPC is any message that crosses the network: a request or its reply. The
+// transport layer routes on this interface so it can delay, drop, or block
+// traffic without knowing the concrete protocol.
+type RPC interface{ RPCName() string }
+
+func (RequestVoteArgs) RPCName() string    { return "RequestVote" }
+func (RequestVoteReply) RPCName() string   { return "RequestVoteReply" }
+func (AppendEntriesArgs) RPCName() string  { return "AppendEntries" }
+func (AppendEntriesReply) RPCName() string { return "AppendEntriesReply" }
+
 // Transport sends RPCs to peers. Implementations (gRPC, HTTP, in-memory for
 // tests) must be safe for concurrent use. The inbound side calls
 // Node.RequestVote and Node.AppendEntries.
