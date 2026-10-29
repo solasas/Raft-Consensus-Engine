@@ -634,6 +634,7 @@ func (n *Node) handleAppendResult(res appendResult) {
 			}
 		}
 	}
+	next = min(next, res.args.PrevLogIndex)    // a rejection must always move us backwards
 	next = max(next, n.matchIndex[res.from]+1) // never regress below what's known replicated
 	next = max(next, 1)
 	n.nextIndex[res.from] = next
