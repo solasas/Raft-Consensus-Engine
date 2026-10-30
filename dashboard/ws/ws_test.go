@@ -230,13 +230,15 @@ func TestHandshakeRejections(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	// Always build headers with Set: a map literal with "Sec-WebSocket-Key" is NOT
+	// the canonical key ("Sec-Websocket-Key"), so Del/Set/Get would see different entries.
 	good := func() http.Header {
-		return http.Header{
-			"Connection":            {"Upgrade"},
-			"Upgrade":               {"websocket"},
-			"Sec-WebSocket-Version": {"13"},
-			"Sec-WebSocket-Key":     {"dGhlIHNhbXBsZSBub25jZQ=="},
-		}
+		h := http.Header{}
+		h.Set("Connection", "Upgrade")
+		h.Set("Upgrade", "websocket")
+		h.Set("Sec-WebSocket-Version", "13")
+		h.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+		return h
 	}
 	tests := []struct {
 		name   string
@@ -289,12 +291,11 @@ func TestUpgradeAcceptsTokenListsInHeaders(t *testing.T) {
 func TestUpgradeFailsCleanlyWithoutHijackSupport(t *testing.T) {
 	rec := httptest.NewRecorder() // does not implement http.Hijacker
 	req := httptest.NewRequest("GET", "/", nil)
-	req.Header = http.Header{
-		"Connection":            {"keep-alive, Upgrade"},
-		"Upgrade":               {"WebSocket"},
-		"Sec-WebSocket-Version": {"13"},
-		"Sec-WebSocket-Key":     {"dGhlIHNhbXBsZSBub25jZQ=="},
-	}
+	req.Header = http.Header{}
+	req.Header.Set("Connection", "keep-alive, Upgrade")
+	req.Header.Set("Upgrade", "WebSocket")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
 	if _, err := Upgrade(rec, req); err == nil {
 		t.Fatal("Upgrade succeeded on a ResponseWriter that cannot be hijacked")
 	}

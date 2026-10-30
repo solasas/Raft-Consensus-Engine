@@ -3,218 +3,386 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>Raft Control Room</title>
 <style>
+  /* =====================================================================
+     Design tokens. One hue per meaning, so colour is information:
+       teal   = healthy / committed / primary action
+       gold   = leader        blue = candidate (election in progress)
+       orange = degraded      red  = fault, severed, stale, failed
+     Everything else is warm neutral.
+     ===================================================================== */
   :root {
-    --bg: #f4f5f7; --surface: #ffffff; --surface2: #eef0f4; --text: #1c2230; --muted: #667085; --border: #d3d8e0;
-    --leader: #c98a00; --leader-bg: #fff4d1; --cand: #2563eb; --cand-bg: #dbe8ff;
-    --ok: #1a9d55; --bad: #d92d3a; --warn: #e07b00; --accent: #4f46e5;
-    --snap: #8b95a7; --commit: #1a9d55; --uncommit: #9ad9b4;
-    --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 1px 3px rgba(16, 24, 40, .1);
+    --bg: #f1eee6; --panel: #faf8f2; --panel-2: #f4f1e8; --panel-3: #eae6d9;
+    --line: #d8d2c1; --line-2: #bdb6a1;
+    --tx: #1a1f1d; --tx-2: #474d48; --tx-3: #777b70;
+    --teal: #0b7a73; --gold: #a46800; --blue: #1c5db0; --red: #c0351e; --orange: #b25c0a; --grey: #6e746b;
+    --on-teal: #ffffff;
+    --ok: var(--teal); --leader: var(--gold); --cand: var(--blue); --bad: var(--red); --warn: var(--orange); --follower: var(--grey);
+    --accent: var(--teal);
+    --ok-bg: color-mix(in srgb, var(--ok) 11%, var(--panel));
+    --leader-bg: color-mix(in srgb, var(--leader) 13%, var(--panel));
+    --cand-bg: color-mix(in srgb, var(--cand) 11%, var(--panel));
+    --bad-bg: color-mix(in srgb, var(--bad) 11%, var(--panel));
+    --warn-bg: color-mix(in srgb, var(--warn) 12%, var(--panel));
+    --snap: #9b9e92; --commit: var(--teal); --uncommit: color-mix(in srgb, var(--teal) 35%, var(--panel));
+    --r: 6px; --r-s: 4px;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e110f; --panel: #151917; --panel-2: #1a1f1c; --panel-3: #232925;
+    --line: #2a302c; --line-2: #3d463f;
+    --tx: #e9e6db; --tx-2: #b0b2a6; --tx-3: #7c8177;
+    --teal: #3ec2b4; --gold: #f1c04b; --blue: #6db3f2; --red: #fa5750; --orange: #f09a45; --grey: #8b9188;
+    --on-teal: #06201c; --snap: #566057;
   }
   @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0f131a; --surface: #171c26; --surface2: #202736; --text: #e6e9f0; --muted: #98a2b3; --border: #2e3647;
-      --leader: #f2b629; --leader-bg: #3a2f10; --cand: #6ea0ff; --cand-bg: #172a52;
-      --ok: #3ccf7e; --bad: #ff6b76; --warn: #ffa042; --accent: #8b87ff;
-      --snap: #5d677b; --commit: #3ccf7e; --uncommit: #2a6a49;
-      --shadow: none;
+    :root:not([data-theme="light"]) {
+      --bg: #0e110f; --panel: #151917; --panel-2: #1a1f1c; --panel-3: #232925;
+      --line: #2a302c; --line-2: #3d463f;
+      --tx: #e9e6db; --tx-2: #b0b2a6; --tx-3: #7c8177;
+      --teal: #3ec2b4; --gold: #f1c04b; --blue: #6db3f2; --red: #fa5750; --orange: #f09a45; --grey: #8b9188;
+      --on-teal: #06201c; --snap: #566057;
     }
   }
+
+  /* ------------------------------------------------------------------ base */
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-  header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 12px 20px; background: var(--surface); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 5; }
-  h1 { font-size: 17px; margin: 0; letter-spacing: .2px; }
-  h2 { font-size: 13px; margin: 0 0 10px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); }
-  h3 { font-size: 12px; margin: 14px 0 6px; color: var(--muted); font-weight: 600; }
-  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; background: var(--surface2); font-size: 12px; font-weight: 600; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
-  .live .dot { background: var(--ok); } .down .dot { background: var(--bad); } .connecting .dot { background: var(--warn); }
-  #stats { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 13px; margin-left: auto; }
-  #stats b { color: var(--text); }
-  #alert { display: none; background: var(--bad); color: #fff; padding: 6px 20px; font-weight: 600; }
-  #alert.on { display: block; }
+  [hidden] { display: none !important; } /* author display rules would otherwise beat the hidden attribute */
+  html { color-scheme: light dark; }
+  :root[data-theme="light"] { color-scheme: light; } :root[data-theme="dark"] { color-scheme: dark; }
+  body { margin: 0; background: var(--bg); color: var(--tx); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; -webkit-font-smoothing: antialiased; }
+  b, strong { font-weight: 650; }
+  .i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+  .label { font: 600 10.5px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--tx-3); }
 
-  main { display: grid; gap: 16px; padding: 16px 20px 40px; max-width: 1500px; margin: 0 auto;
-    grid-template-columns: minmax(0, 1.45fr) minmax(300px, 1fr);
-    grid-template-areas: "graph side" "repl feed" "logs feed"; }
-  @media (max-width: 980px) { main { grid-template-columns: 1fr; grid-template-areas: "graph" "side" "repl" "logs" "feed"; } }
-  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; box-shadow: var(--shadow); min-width: 0; }
-  .graph { grid-area: graph; } .side { grid-area: side; display: grid; gap: 16px; align-content: start; }
-  .repl { grid-area: repl; } .logs { grid-area: logs; } .feed { grid-area: feed; display: flex; flex-direction: column; max-height: 880px; }
+  /* ---------------------------------------------------------------- top bar */
+  .topbar { display: flex; align-items: center; gap: 16px; height: 56px; padding: 0 24px; background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 30; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .mark { width: 28px; height: 28px; display: grid; place-items: center; border: 1.5px solid var(--teal); color: var(--teal); border-radius: 3px; }
+  .mark .i { width: 17px; height: 17px; stroke-width: 1.9; }
+  .brand b { font: 600 19px/1 var(--serif); letter-spacing: -.01em; }
+  .brand span { font: 500 10.5px var(--mono); letter-spacing: .08em; color: var(--tx-3); text-transform: uppercase; padding-left: 12px; border-left: 1px solid var(--line); }
+  .spacer { flex: 1; }
+  .conn { display: inline-flex; align-items: center; gap: 8px; padding: 4px 10px; border: 1px solid var(--line); border-radius: var(--r-s); font: 600 11px var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--tx-2); }
+  .conn .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }
+  .conn.live .dot { background: var(--teal); animation: blink 2.4s ease-in-out infinite; } .conn.down .dot { background: var(--red); }
+  @keyframes blink { 50% { opacity: .35; } }
+  .iconbtn { width: 32px; height: 32px; display: grid; place-items: center; border-radius: var(--r-s); border: 1px solid var(--line); background: transparent; color: var(--tx-2); cursor: pointer; padding: 0; }
+  .iconbtn:hover { color: var(--tx); border-color: var(--line-2); background: var(--panel-2); }
 
-  /* ---- network graph ---- */
-  svg#net { width: 100%; height: auto; max-height: 560px; display: block; user-select: none; }
-  .hit { stroke: transparent; stroke-width: 22; cursor: pointer; pointer-events: stroke; }
-  .wire { stroke-width: 3; pointer-events: none; transition: stroke .25s; }
-  .edge.ok .wire { stroke: var(--ok); opacity: .55; }
-  .edge.deg .wire { stroke: var(--warn); stroke-dasharray: 2 5; stroke-linecap: round; }
-  .edge.half .wire { stroke: var(--warn); stroke-dasharray: 8 6; }
-  .edge.sev .wire { stroke: var(--bad); stroke-dasharray: 3 8; stroke-linecap: round; opacity: .9; }
-  .edge.flow .wire { stroke-dasharray: 7 7; animation: dash .9s linear infinite; opacity: .85; }
-  .edge.sel .wire { stroke-width: 6; }
-  .edge:hover .wire { stroke-width: 5; }
-  .arrow { fill: var(--ok); pointer-events: none; opacity: .8; }
-  .arrow.bad { fill: var(--bad); }
-  .edge-label { font-size: 11px; fill: var(--warn); text-anchor: middle; pointer-events: none; font-weight: 600; }
+  #banner { display: none; align-items: center; gap: 10px; padding: 9px 24px; font-weight: 600; font-size: 13px; border-bottom: 1px solid var(--line); border-left: 4px solid; }
+  #banner.on { display: flex; }
+  #banner.bad { background: var(--bad-bg); color: var(--bad); border-left-color: var(--bad); }
+  #banner.warn { background: var(--warn-bg); color: var(--warn); border-left-color: var(--warn); }
+  #banner span { color: var(--tx-2); font-weight: 500; }
+
+  /* ----------------------------------------------------------------- layout */
+  .shell { display: grid; gap: 16px; padding: 18px 24px 56px; max-width: 1560px; margin: 0 auto;
+    grid-template-columns: minmax(0, 1.55fr) minmax(330px, 1fr);
+    grid-template-areas: "kpis kpis" "topo rail" "repl time" "logs logs"; }
+  @media (max-width: 1040px) { .shell { grid-template-columns: minmax(0, 1fr); grid-template-areas: "kpis" "topo" "rail" "repl" "time" "logs"; padding: 14px; } .topbar { padding: 0 14px; } .brand span { display: none; } #banner { padding: 9px 14px; } }
+  .topo { grid-area: topo; } .rail { grid-area: rail; display: grid; gap: 16px; align-content: start; }
+  .repl { grid-area: repl; } .time { grid-area: time; display: flex; flex-direction: column; min-height: 0; } .logs { grid-area: logs; }
+  .stale-data { opacity: .55; filter: saturate(.4); }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); min-width: 0; }
+  .card > header { display: flex; align-items: center; gap: 12px; padding: 11px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; min-height: 44px; }
+  .card > header h2 { margin: 0; font: 650 11px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--tx); }
+  .card > header .sub { font: 500 11.5px var(--mono); color: var(--tx-3); }
+  .card > .body { padding: 14px 16px 16px; }
+  .section-label { font: 600 10.5px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--tx-3); margin: 18px 0 6px; display: flex; align-items: center; gap: 10px; }
+  .section-label::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
+  .section-label:first-child { margin-top: 0; }
+
+  /* ------------------------------------------------------------------- KPIs */
+  .kpis { grid-area: kpis; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
+  @media (max-width: 1180px) { .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } .kpis .kpi:nth-child(5) { grid-column: span 2; } }
+  @media (max-width: 640px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } .kpis .kpi:nth-child(5) { grid-column: 1 / -1; } }
+  .kpi { background: var(--panel); padding: 13px 18px 14px; position: relative; overflow: hidden; min-height: 98px; }
+  .kpi .val { font: 600 28px/1.1 var(--mono); letter-spacing: -.03em; margin-top: 9px; display: flex; align-items: baseline; gap: 8px; font-variant-numeric: tabular-nums; }
+  .kpi .val small { font: 500 11.5px var(--mono); color: var(--tx-3); letter-spacing: 0; }
+  .kpi .note { font-size: 12px; color: var(--tx-2); margin-top: 5px; }
+  .kpi.good .val { color: var(--ok); } .kpi.warn .val { color: var(--warn); } .kpi.bad .val { color: var(--bad); } .kpi.lead .val { color: var(--leader); }
+  .kpi svg.spark { position: absolute; right: 0; bottom: 0; width: 52%; height: 42px; pointer-events: none; }
+  .qdots { display: flex; gap: 4px; margin-top: 9px; }
+  .qdots i { width: 16px; height: 6px; border-radius: 1px; background: var(--panel-3); border: 1px solid var(--line-2); }
+  .qdots i.on { background: var(--ok); border-color: var(--ok); } .qdots i.lead { background: var(--leader); border-color: var(--leader); }
+
+  /* --------------------------------------------------------------- topology */
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; margin-left: auto; }
+  .chip-l { display: inline-flex; align-items: center; gap: 7px; font: 500 11px var(--mono); color: var(--tx-3); }
+  .chip-l i { display: inline-block; width: 18px; border-top: 2px solid; }
+  .stage { background-image: radial-gradient(var(--line) 1px, transparent 1.2px); background-size: 20px 20px; background-position: 10px 10px; border-bottom: 1px solid var(--line); }
+  svg#net { width: 100%; height: auto; max-height: 600px; display: block; user-select: none; }
+  .topo-foot { padding: 10px 16px 12px; color: var(--tx-3); font-size: 12px; display: flex; gap: 6px 18px; flex-wrap: wrap; }
+  .topo-foot kbd { font: 11px var(--mono); padding: 0 5px; border-radius: 3px; background: var(--panel-3); border: 1px solid var(--line); color: var(--tx-2); }
+  #topoEmpty { display: grid; place-items: center; height: 380px; color: var(--tx-3); text-align: center; font: 500 12px var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+  .spinner { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--line-2); border-top-color: var(--teal); animation: spin .9s linear infinite; margin: 0 auto 12px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .hit { stroke: transparent; stroke-width: 24; cursor: pointer; pointer-events: stroke; fill: none; }
+  .hit:focus-visible { stroke: color-mix(in srgb, var(--accent) 28%, transparent); outline: none; }
+  .wire { stroke-width: 2; stroke-linecap: round; pointer-events: none; transition: stroke .25s; }
+  .edge.ok .wire { stroke: var(--line-2); }
+  .edge.flow .wire { stroke: var(--teal); stroke-dasharray: 5 9; animation: dash 1.4s linear infinite; }
+  .edge.deg .wire { stroke: var(--warn); stroke-dasharray: 1 6; stroke-width: 3; }
+  .edge.half .wire { stroke: var(--warn); stroke-dasharray: 8 6; stroke-width: 2.5; }
+  .edge.sev .wire { stroke: var(--bad); stroke-dasharray: 1 8; stroke-width: 3.5; }
+  .edge.sel .wire { stroke-width: 5; } .edge:hover .wire { stroke-width: 4; }
+  .arrow { fill: var(--line-2); pointer-events: none; transition: fill .25s; } .arrow.bad { fill: var(--bad); }
+  .halo-text { paint-order: stroke; stroke: var(--panel); stroke-width: 5px; stroke-linejoin: round; }
+  .edge-label { font: 600 10.5px var(--mono); fill: var(--warn); text-anchor: middle; pointer-events: none; }
   @keyframes dash { to { stroke-dashoffset: -14; } }
-  @keyframes pulse { 0%, 100% { opacity: .15; } 50% { opacity: .8; } }
+  @keyframes pulse { 0%, 100% { opacity: 0; } 50% { opacity: .9; } }
 
   .node { cursor: pointer; }
-  .node .halo { fill: none; stroke: transparent; stroke-width: 5; }
-  .node .body { fill: var(--surface2); stroke: var(--border); stroke-width: 2.5; transition: fill .25s, stroke .25s; }
-  .node text { text-anchor: middle; fill: var(--text); pointer-events: none; }
-  .node .nid { font-size: 17px; font-weight: 700; } .node .nterm { font-size: 12px; } .node .nrole { font-size: 9.5px; letter-spacing: .7px; fill: var(--muted); font-weight: 700; }
-  .node.leader .body { fill: var(--leader-bg); stroke: var(--leader); stroke-width: 4; }
-  .node.leader .halo { stroke: var(--leader); opacity: .3; }
-  .node.candidate .body { fill: var(--cand-bg); stroke: var(--cand); stroke-width: 3.5; }
-  .node.candidate .halo { stroke: var(--cand); animation: pulse 1s ease-in-out infinite; }
-  .node.stale .halo { stroke: var(--bad); stroke-dasharray: 5 4; opacity: 1; animation: none; }
-  .node .nflag { font-size: 10.5px; font-weight: 700; letter-spacing: .6px; fill: var(--bad); }
-  .node.isolated .body { stroke-dasharray: 6 5; }
-  .node.sel .body { stroke: var(--accent); stroke-width: 5; }
-  .legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-top: 6px; }
-  .legend i { display: inline-block; width: 16px; height: 0; border-top: 3px solid; margin-right: 5px; vertical-align: middle; }
+  .node .halo { fill: none; stroke: transparent; stroke-width: 2; }
+  .node .body { fill: var(--panel); stroke: var(--line-2); stroke-width: 2; transition: fill .3s, stroke .3s; }
+  .node .track { fill: none; stroke: var(--line); stroke-width: 3; } .node .ring { fill: none; stroke: var(--commit); stroke-width: 3; transform: rotate(-90deg); transition: stroke-dashoffset .35s ease; }
+  .node text { text-anchor: middle; pointer-events: none; }
+  .node .nid { font: 700 17px var(--mono); fill: var(--tx); letter-spacing: -.02em; }
+  .node .nrole { font: 600 8px var(--mono); letter-spacing: .14em; fill: var(--tx-3); }
+  .node .tpill { fill: var(--panel-3); stroke: var(--line); } .node .nterm { font: 600 10.5px var(--mono); fill: var(--tx-2); }
+  .node .crown { display: none; fill: var(--leader); }
+  .node .nflag { font: 700 9.5px var(--mono); letter-spacing: .1em; fill: var(--bad); paint-order: stroke; stroke: var(--panel); stroke-width: 4px; }
+  .node.leader .body { fill: var(--leader-bg); stroke: var(--leader); stroke-width: 2.5; } .node.leader .crown { display: block; } .node.leader .nrole { fill: var(--leader); }
+  .node.candidate .body { fill: var(--cand-bg); stroke: var(--cand); stroke-width: 2.5; } .node.candidate .halo { stroke: var(--cand); animation: pulse 1.1s ease-in-out infinite; } .node.candidate .nrole { fill: var(--cand); }
+  .node.stale .halo { stroke: var(--bad); stroke-dasharray: 4 3; }
+  .node.isolated .body { stroke-dasharray: 5 4; }
+  .node.sel .body { stroke: var(--tx); stroke-width: 3.5; }
+  .node:focus-visible { outline: none; } .node:focus-visible .halo { stroke: var(--accent); }
 
-  /* ---- controls ---- */
-  button { font: inherit; padding: 6px 12px; border-radius: 7px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); cursor: pointer; }
-  button:hover { border-color: var(--accent); }
-  button:active { transform: translateY(1px); }
-  button.danger { background: var(--bad); border-color: var(--bad); color: #fff; font-weight: 600; }
-  button.good { background: var(--ok); border-color: var(--ok); color: #fff; font-weight: 600; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
-  .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
-  .hint { color: var(--muted); }
-  .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 6px 0; }
-  .kv span:nth-child(odd) { color: var(--muted); }
-  .bad-text { color: var(--bad); font-weight: 700; } .ok-text { color: var(--ok); font-weight: 600; } .warn-text { color: var(--warn); font-weight: 600; }
-  label.row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
-  label.row > span:first-child { min-width: 84px; color: var(--muted); }
-  input[type=range] { flex: 1; accent-color: var(--accent); }
-  input[type=text], select { font: inherit; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); min-width: 0; }
-  input[type=text] { width: 100%; }
-  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  /* --------------------------------------------------------------- controls */
+  .btn { font: 600 12.5px var(--mono); letter-spacing: .01em; display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 8px 13px; border-radius: var(--r-s); border: 1px solid var(--line-2); background: var(--panel); color: var(--tx); cursor: pointer; transition: background .12s, border-color .12s; white-space: nowrap; }
+  .btn:hover { background: var(--panel-3); } .btn:active { transform: translateY(1px); }
+  .btn.primary { background: var(--teal); border-color: var(--teal); color: var(--on-teal); } .btn.primary:hover { background: var(--teal); filter: brightness(1.1); }
+  .btn.danger { background: var(--red); border-color: var(--red); color: #fff; } .btn.danger:hover { background: var(--red); filter: brightness(1.1); }
+  .btn.good { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 50%, transparent); background: var(--ok-bg); }
+  .btn.soft-danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 50%, transparent); background: var(--bad-bg); }
+  .btn.block { width: 100%; }
+  .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  .scenarios { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .scenario { display: flex; align-items: flex-start; gap: 10px; text-align: left; padding: 10px 12px; border-radius: var(--r-s); border: 1px solid var(--line); border-left: 3px solid var(--c, var(--line-2)); background: var(--panel-2); color: var(--tx); cursor: pointer; font: inherit; }
+  .scenario:hover { background: var(--panel-3); border-color: var(--line-2); border-left-color: var(--c, var(--line-2)); }
+  .scenario .i { margin-top: 2px; color: var(--c, var(--tx-2)); } .scenario b { display: block; font-size: 13px; line-height: 1.25; } .scenario small { display: block; color: var(--tx-3); font-size: 11.5px; line-height: 1.3; margin-top: 2px; }
+  .scenario.bad { --c: var(--red); } .scenario.good { --c: var(--teal); } .scenario.neutral { --c: var(--grey); }
+  .field { display: flex; flex-direction: column; gap: 5px; min-width: 0; } .field > span { font: 600 10.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--tx-3); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  input[type=text], select { font: 13px var(--mono); width: 100%; padding: 7px 10px; border-radius: var(--r-s); border: 1px solid var(--line-2); background: var(--panel-2); color: var(--tx); min-width: 0; }
+  input[type=text]:focus, select:focus { outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); border-color: var(--accent); }
+  .slider { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 6px 12px; margin-top: 14px; }
+  .slider label { font: 600 10.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--tx-3); } .slider output { font: 650 13px var(--mono); min-width: 44px; text-align: right; }
+  .slider input { grid-column: 1 / -1; }
+  input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 4px; border-radius: 0; background: var(--line-2); }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 20px; border-radius: 2px; background: var(--teal); border: 2px solid var(--panel); box-shadow: 0 0 0 1px var(--teal); cursor: pointer; }
+  input[type=range]::-moz-range-thumb { width: 8px; height: 16px; border-radius: 2px; background: var(--teal); border: 2px solid var(--panel); cursor: pointer; }
+  .seg { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--line-2); border-radius: var(--r-s); overflow: hidden; margin-top: 6px; }
+  .seg button { font: 600 11.5px var(--mono); padding: 7px 4px; border: 0; border-left: 1px solid var(--line-2); background: var(--panel-2); color: var(--tx-2); cursor: pointer; }
+  .seg button:first-child { border-left: 0; } .seg button:hover { background: var(--panel-3); }
+  .seg button[aria-pressed="true"] { background: var(--teal); color: var(--on-teal); }
+  .hint { color: var(--tx-3); font-size: 12px; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 0; margin: 12px 0 0; font-size: 13px; border-top: 1px solid var(--line); }
+  .kv dt, .kv dd { padding: 6px 0; border-bottom: 1px solid var(--line); margin: 0; } .kv dt { color: var(--tx-3); } .kv dd { font: 600 12.5px var(--mono); text-align: right; }
+  .dirs { display: grid; gap: 0; border: 1px solid var(--line); border-radius: var(--r-s); }
+  .dir { display: flex; align-items: center; justify-content: space-between; padding: 9px 12px; font: 600 13px var(--mono); }
+  .dir + .dir { border-top: 1px solid var(--line); } .dir .arrowtxt { color: var(--tx-3); margin: 0 6px; }
+  .tag { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 3px; font: 650 10.5px/1.6 var(--mono); letter-spacing: .06em; text-transform: uppercase; border: 1px solid var(--line-2); color: var(--tx-2); background: transparent; }
+  .tag.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 55%, transparent); background: var(--ok-bg); }
+  .tag.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 55%, transparent); background: var(--bad-bg); }
+  .tag.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, transparent); background: var(--warn-bg); }
+  .tag.leader { color: var(--leader); border-color: color-mix(in srgb, var(--leader) 60%, transparent); background: var(--leader-bg); }
+  .tag.candidate { color: var(--cand); border-color: color-mix(in srgb, var(--cand) 60%, transparent); background: var(--cand-bg); }
+  .empty { display: grid; justify-items: center; text-align: center; gap: 6px; padding: 22px 8px; color: var(--tx-3); } .empty .i { width: 24px; height: 24px; stroke-width: 1.4; }
 
-  /* ---- replication bars ---- */
-  .rrow { display: grid; grid-template-columns: 74px 1fr; gap: 4px 12px; align-items: center; margin: 8px 0; }
-  .rrow .name { font-weight: 700; } .rrow .name small { font-weight: 600; color: var(--muted); display: block; font-size: 10px; letter-spacing: .5px; }
-  .rrow .nums { grid-column: 2; color: var(--muted); font-size: 12px; margin-top: -2px; }
-  .bar { position: relative; height: 16px; border-radius: 8px; background: var(--surface2); overflow: hidden; border: 1px solid var(--border); }
-  .seg { position: absolute; top: 0; bottom: 0; transition: left .35s ease, width .35s ease; }
-  .seg.snap { background: repeating-linear-gradient(45deg, var(--snap), var(--snap) 4px, transparent 4px, transparent 8px); }
-  .seg.commit { background: var(--commit); } .seg.unc { background: var(--uncommit); }
-  .seg.match { background: var(--accent); } .seg.next { width: 3px; background: var(--warn); }
-  .badge { display: inline-block; padding: 0 7px; border-radius: 5px; font-size: 11px; font-weight: 700; background: var(--surface2); color: var(--muted); }
-  .badge.snapping { background: var(--warn); color: #fff; }
-  .key { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
-  .key i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 4px; vertical-align: -1px; }
+  /* ------------------------------------------------------------ replication */
+  .keyline { display: flex; gap: 14px; flex-wrap: wrap; color: var(--tx-3); font: 500 11px var(--mono); }
+  .keyline span { display: inline-flex; align-items: center; gap: 6px; } .keyline i { width: 10px; height: 10px; display: inline-block; border-radius: 1px; }
+  .rrow { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 4px 14px; align-items: center; padding: 11px 0; border-bottom: 1px solid var(--line); }
+  .rrow:last-child { border-bottom: 0; padding-bottom: 0; }
+  .rrow .name { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; } .rrow .name b { font: 700 14px var(--mono); }
+  .bar { position: relative; height: 12px; background: var(--panel-3); overflow: hidden; border: 1px solid var(--line); border-radius: 2px; }
+  .seg-fill { position: absolute; top: 0; bottom: 0; transition: left .35s ease, width .35s ease; }
+  .seg-fill.snap { background: repeating-linear-gradient(135deg, var(--snap) 0 3px, transparent 3px 6px); }
+  .seg-fill.commit { background: var(--commit); } .seg-fill.unc { background: var(--uncommit); }
+  .seg-fill.match { background: var(--teal); } .seg-fill.next { width: 2px; background: var(--warn); }
+  .nums { grid-column: 2; display: flex; flex-wrap: wrap; gap: 2px 16px; color: var(--tx-3); font: 500 11.5px var(--mono); margin-top: 3px; }
+  .nums b { color: var(--tx); font-weight: 650; }
 
-  /* ---- log tail ---- */
-  #logTail { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-  .chip { padding: 3px 9px; border-radius: 6px; border: 1.5px solid var(--border); border-left-width: 5px; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--surface2); }
-  .chip.unc { background: transparent; border-style: dashed; color: var(--muted); }
-  .chip.noop { opacity: .7; font-style: italic; }
-  .snapmark { padding: 3px 9px; border-radius: 6px; background: var(--snap); color: #fff; font-size: 12px; font-weight: 700; }
+  /* ------------------------------------------------------------------- logs */
+  .tabs { display: flex; gap: 0; flex-wrap: wrap; margin-left: auto; border: 1px solid var(--line-2); border-radius: var(--r-s); overflow: hidden; }
+  .tab { font: 650 11.5px var(--mono); display: inline-flex; align-items: center; gap: 7px; padding: 5px 12px; border: 0; border-left: 1px solid var(--line-2); background: var(--panel-2); color: var(--tx-2); cursor: pointer; }
+  .tab:first-child { border-left: 0; } .tab:hover { background: var(--panel-3); }
+  .tab[aria-selected="true"] { background: var(--tx); color: var(--bg); }
+  .tab i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; background: var(--follower); } .tab i.leader { background: var(--leader); } .tab i.candidate { background: var(--cand); }
+  #logTail { display: flex; flex-wrap: wrap; gap: 6px; align-items: stretch; }
+  .entry { display: flex; flex-direction: column; gap: 3px; min-width: 100px; padding: 6px 10px 7px; border-radius: 3px; background: var(--panel-2); border: 1px solid var(--line); border-top: 3px solid var(--c, var(--line-2)); }
+  .entry .ix { font: 500 10.5px var(--mono); color: var(--tx-3); display: flex; justify-content: space-between; gap: 10px; }
+  .entry .cmd { font: 12.5px var(--mono); color: var(--tx); overflow-wrap: anywhere; }
+  .entry.unc { background: repeating-linear-gradient(135deg, transparent 0 5px, color-mix(in srgb, var(--warn) 11%, transparent) 5px 10px); border-style: dashed; border-top-style: solid; }
+  .entry.unc .cmd { color: var(--tx-2); } .entry.noop .cmd { color: var(--tx-3); font-style: italic; }
+  .snapmark { display: flex; align-items: center; padding: 0 12px; border-radius: 3px; background: repeating-linear-gradient(135deg, var(--snap) 0 5px, color-mix(in srgb, var(--snap) 72%, #000) 5px 10px); color: #fff; font: 700 11px var(--mono); letter-spacing: .04em; }
 
-  /* ---- event feed ---- */
-  #termStrip { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
-  #termStrip .pill { background: var(--leader-bg); color: var(--text); border: 1px solid var(--leader); }
-  #feed { list-style: none; margin: 0; padding: 0; overflow: auto; flex: 1; }
-  #feed li { display: grid; grid-template-columns: 82px auto 1fr; gap: 2px 8px; padding: 5px 0; border-bottom: 1px solid var(--border); align-items: baseline; }
-  #feed time { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
-  #feed .who { font-weight: 700; min-width: 28px; }
-  #feed .msg { color: var(--text); overflow-wrap: anywhere; }
-  .kind { display: inline-block; padding: 0 7px; border-radius: 5px; font-size: 11px; font-weight: 700; margin-right: 6px; color: #fff; background: var(--muted); }
-  .k-candidate { background: var(--cand); } .k-leader { background: var(--leader); } .k-follower { background: var(--muted); }
-  .k-vote { background: #8b5cf6; } .k-chaos { background: var(--bad); } .k-write-ok { background: var(--ok); }
-  .k-write-failed { background: var(--bad); } .k-write { background: #0e9aa7; } .k-compact { background: #0e9aa7; } .k-install-snapshot { background: var(--warn); }
+  /* --------------------------------------------------------------- timeline */
+  .filters { display: flex; padding: 10px 16px 0; }
+  .filters .seg-row { display: flex; border: 1px solid var(--line-2); border-radius: var(--r-s); overflow: hidden; flex-wrap: wrap; }
+  #ribbon { display: flex; gap: 6px; flex-wrap: wrap; padding: 12px 16px 2px; align-items: center; }
+  .term-chip { display: inline-flex; align-items: center; gap: 7px; padding: 2px 8px; border-radius: 3px; background: var(--leader-bg); border: 1px solid color-mix(in srgb, var(--leader) 50%, transparent); font: 650 11px var(--mono); }
+  .term-chip i { width: 8px; height: 8px; background: var(--c); display: inline-block; }
+  #feed { list-style: none; margin: 8px 0 0; padding: 0 16px 8px; overflow: auto; flex: 1; max-height: 560px; }
+  #feed li { display: grid; grid-template-columns: 1fr auto; gap: 0 12px; padding: 8px 0 8px 12px; border-bottom: 1px solid var(--line); border-left: 3px solid var(--k); margin-left: 0; align-items: start; }
+  #feed li + li { margin-top: 0; }
+  #feed .t1 { font: 650 11px var(--mono); letter-spacing: .05em; text-transform: uppercase; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; color: var(--k); }
+  #feed .who { display: inline-flex; align-items: center; gap: 6px; color: var(--tx); } #feed .who i { width: 8px; height: 8px; background: var(--c); display: inline-block; }
+  #feed .t2 { color: var(--tx-2); font-size: 12.5px; overflow-wrap: anywhere; margin-top: 1px; }
+  #feed time { color: var(--tx-3); font: 500 11px var(--mono); white-space: nowrap; }
+  #feedEmpty { padding: 28px 18px; text-align: center; color: var(--tx-3); }
 
-  #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--bad); color: #fff; padding: 8px 16px; border-radius: 8px; font-weight: 600; opacity: 0; pointer-events: none; transition: opacity .2s; max-width: 90vw; z-index: 20; }
-  #toast.on { opacity: 1; }
+  #toast { position: fixed; bottom: 22px; left: 50%; transform: translate(-50%, 12px); background: var(--tx); color: var(--bg); padding: 10px 16px; border-radius: var(--r-s); font: 600 12.5px var(--mono); opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; max-width: 92vw; z-index: 60; }
+  #toast.on { opacity: 1; transform: translate(-50%, 0); } #toast.err { background: var(--red); color: #fff; }
 </style>
 </head>
 <body>
-<header>
-  <h1>Raft Control Room</h1>
-  <span id="conn" class="pill connecting"><span class="dot"></span><span id="connText">connecting…</span></span>
-  <div id="stats"></div>
-</header>
-<div id="alert" role="alert"></div>
 
-<main>
-  <section class="card graph">
-    <h2>Network &mdash; click a link or a node</h2>
-    <svg id="net" viewBox="0 0 640 524" role="img" aria-label="Cluster network graph"></svg>
-    <div class="legend">
-      <span><i style="border-color:var(--ok)"></i>healthy</span>
-      <span><i style="border-color:var(--warn);border-top-style:dotted"></i>loss / latency</span>
-      <span><i style="border-color:var(--warn);border-top-style:dashed"></i>one way cut</span>
-      <span><i style="border-color:var(--bad);border-top-style:dotted"></i>severed</span>
-      <span>triangles show each direction</span>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-logo" viewBox="0 0 24 24"><circle cx="12" cy="5" r="2.2"/><circle cx="5" cy="18" r="2.2"/><circle cx="19" cy="18" r="2.2"/><path d="M11 7l-5 9M13 7l5 9M7.3 18h9.4"/></symbol>
+    <symbol id="i-crown" viewBox="0 0 24 24"><path d="M3 19h18M4 17L3 7l5 4 4-7 4 7 5-4-1 10z"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></symbol>
+    <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></symbol>
+    <symbol id="i-db" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3L2 20h20z"/><path d="M12 10v4M12 17.5v.5"/></symbol>
+    <symbol id="i-cut" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l2.8-2.8a4 4 0 0 0-5.7-5.7L11.4 6.9M14 10a4 4 0 0 0-5.7 0l-2.8 2.8a4 4 0 0 0 5.7 5.7l1.4-1.4"/><path d="M4 4l16 16"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l2.8-2.8a4 4 0 0 0-5.7-5.7L11.4 6.9M14 10a4 4 0 0 0-5.7 0l-2.8 2.8a4 4 0 0 0 5.7 5.7l1.4-1.4"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></symbol>
+    <symbol id="i-split" viewBox="0 0 24 24"><path d="M12 3v6M12 9l-6 6v6M12 9l6 6v6"/></symbol>
+    <symbol id="i-heal" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-reset" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4z"/></symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 2l9 5-9 5-9-5zM3 12l9 5 9-5M3 17l9 5 9-5"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></symbol>
+    <symbol id="i-vote" viewBox="0 0 24 24"><path d="M5 12l4 4 10-10"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+    <symbol id="i-flag" viewBox="0 0 24 24"><path d="M5 22V4M5 4h13l-2 4 2 4H5"/></symbol>
+    <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></symbol>
+    <symbol id="i-pen" viewBox="0 0 24 24"><path d="M4 20l4-1L19 8l-3-3L5 16z"/></symbol>
+    <symbol id="i-touch" viewBox="0 0 24 24"><path d="M9 11V5a2 2 0 0 1 4 0v6l5 1v4a6 6 0 0 1-6 6h-1a6 6 0 0 1-4.5-2L4 15l2-1.5z"/></symbol>
+  </defs>
+</svg>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="mark"><svg class="i"><use href="#i-logo"/></svg></div>
+    <b>Raft Control Room</b><span>consensus &middot; chaos lab</span>
+  </div>
+  <div class="spacer"></div>
+  <div id="conn" class="conn"><span class="dot"></span><span id="connText">Connecting…</span></div>
+  <button id="themeBtn" class="iconbtn" aria-label="Toggle light and dark theme" title="Toggle theme"><svg class="i"><use id="themeIcon" href="#i-moon"/></svg></button>
+</header>
+<div id="banner" role="status" aria-live="polite"></div>
+
+<main class="shell" id="shell">
+  <section class="kpis" id="kpis" aria-label="Cluster health"></section>
+
+  <section class="card topo" aria-labelledby="topoTitle">
+    <header>
+      <h2 id="topoTitle">Network topology</h2>
+      <div class="legend">
+        <span class="chip-l"><i style="border-color:var(--ok)"></i>healthy</span>
+        <span class="chip-l"><i style="border-color:var(--warn);border-top-style:dotted"></i>loss / latency</span>
+        <span class="chip-l"><i style="border-color:var(--warn);border-top-style:dashed"></i>one-way cut</span>
+        <span class="chip-l"><i style="border-color:var(--bad);border-top-style:dotted"></i>severed</span>
+      </div>
+    </header>
+    <div class="stage">
+      <div id="topoEmpty"><div><div class="spinner"></div>Connecting to the cluster…</div></div>
+      <svg id="net" viewBox="0 0 640 570" role="group" aria-label="Cluster network graph" hidden></svg>
+    </div>
+    <div class="topo-foot">
+      <span>Click a <b>link</b> to cut it, or a <b>node</b> to isolate it and read its log.</span>
+      <span><kbd>Tab</kbd> then <kbd>Enter</kbd> works too. Triangles show each direction; rings show commit progress.</span>
     </div>
   </section>
 
-  <aside class="side">
-    <section class="card" id="selPanel"></section>
-
-    <section class="card">
-      <h2>Chaos</h2>
-      <div class="btns" style="margin-top:0">
-        <button id="bIsoLeader" class="danger">Isolate leader</button>
-        <button id="bSplit" class="danger">Split majority | minority</button>
-        <button id="bHeal" class="good">Heal partitions</button>
-        <button id="bReset">Reset network</button>
-      </div>
-      <label class="row"><span>Packet loss</span><input id="rDrop" type="range" min="0" max="50" step="5" value="0"><b id="vDrop">0%</b></label>
-      <label class="row"><span>Latency</span>
-        <select id="sLat">
-          <option value="0,0">none</option>
-          <option value="20,60">20&ndash;60 ms</option>
-          <option value="100,500">100&ndash;500 ms</option>
-          <option value="500,1500">500&ndash;1500 ms</option>
-        </select></label>
+  <aside class="rail">
+    <section class="card" aria-live="polite">
+      <header><h2 id="selTitle">Inspector</h2><span class="sub" id="selSub"></span></header>
+      <div class="body" id="selPanel"></div>
     </section>
 
     <section class="card">
-      <h2>Client writes</h2>
-      <div class="grid2">
-        <input id="iKey" type="text" value="color" maxlength="64" aria-label="key">
-        <input id="iVal" type="text" value="red" maxlength="256" aria-label="value">
+      <header><h2>Chaos</h2><span class="sub">inject faults live</span></header>
+      <div class="body">
+        <div class="scenarios">
+          <button class="scenario bad" id="bIsoLeader"><svg class="i"><use href="#i-bolt"/></svg><span><b>Isolate leader</b><small>Force an election</small></span></button>
+          <button class="scenario bad" id="bSplit"><svg class="i"><use href="#i-split"/></svg><span><b>Split cluster</b><small>Majority | minority</small></span></button>
+          <button class="scenario good" id="bHeal"><svg class="i"><use href="#i-heal"/></svg><span><b>Heal partitions</b><small>Keeps loss &amp; latency</small></span></button>
+          <button class="scenario neutral" id="bReset"><svg class="i"><use href="#i-reset"/></svg><span><b>Reset network</b><small>Back to perfect</small></span></button>
+        </div>
+        <div class="slider"><label for="rDrop">Packet loss</label><output id="vDrop">0%</output><input id="rDrop" type="range" min="0" max="50" step="5" value="0"></div>
+        <div class="section-label" style="margin:14px 0 0">Latency</div>
+        <div class="seg" id="segLat" role="group" aria-label="Latency preset">
+          <button data-v="0,0" aria-pressed="true">None</button>
+          <button data-v="20,60" aria-pressed="false">20–60ms</button>
+          <button data-v="100,500" aria-pressed="false">100–500ms</button>
+          <button data-v="500,1500" aria-pressed="false">0.5–1.5s</button>
+        </div>
       </div>
-      <label class="row"><span>Send to</span><select id="sTarget"><option value="">current leader</option></select></label>
-      <div class="btns" style="margin-top:4px">
-        <button id="bPut" class="primary">Write</button>
-        <button id="bBurst">Burst &times;50</button>
+    </section>
+
+    <section class="card">
+      <header><h2>Client</h2><span class="sub">replicated key-value store</span></header>
+      <div class="body">
+        <div class="grid2">
+          <label class="field"><span>Key</span><input id="iKey" type="text" value="color" maxlength="64" autocomplete="off"></label>
+          <label class="field"><span>Value</span><input id="iVal" type="text" value="red" maxlength="256" autocomplete="off"></label>
+        </div>
+        <label class="field" style="margin-top:10px"><span>Send to</span><select id="sTarget"><option value="">Current leader</option></select></label>
+        <div class="btns">
+          <button id="bPut" class="btn primary"><svg class="i"><use href="#i-send"/></svg>Write</button>
+          <button id="bBurst" class="btn"><svg class="i"><use href="#i-layers"/></svg>Burst × 50</button>
+        </div>
+        <div class="slider"><label for="rLoad">Background load</label><output id="vLoad">off</output><input id="rLoad" type="range" min="0" max="50" step="5" value="0"></div>
+        <p class="hint" style="margin:10px 0 0">Send a write to a stale, isolated leader to watch an entry that can never commit.</p>
       </div>
-      <label class="row"><span>Background</span><input id="rLoad" type="range" min="0" max="50" step="5" value="0"><b id="vLoad">off</b></label>
-      <div class="hint">Write to a stale, isolated leader to watch an entry that can never commit.</div>
     </section>
   </aside>
 
-  <section class="card repl">
-    <h2>Log replication</h2>
-    <div class="key">
-      <span><i style="background:repeating-linear-gradient(45deg,var(--snap),var(--snap) 3px,transparent 3px,transparent 6px)"></i>snapshotted</span>
-      <span><i style="background:var(--commit)"></i>committed</span>
-      <span><i style="background:var(--uncommit)"></i>uncommitted</span>
+  <section class="card repl" aria-labelledby="replTitle">
+    <header><h2 id="replTitle">Log replication</h2>
+      <div class="keyline" style="margin:0 0 0 auto">
+        <span><i style="background:repeating-linear-gradient(135deg,var(--snap) 0 3px,transparent 3px 6px)"></i>snapshotted</span>
+        <span><i style="background:var(--commit)"></i>committed</span>
+        <span><i style="background:var(--uncommit)"></i>uncommitted</span>
+      </div>
+    </header>
+    <div class="body">
+      <div class="section-label">Every node</div>
+      <div id="repl"></div>
+      <div class="section-label" id="peersTitle">Leader's view of its followers</div>
+      <div id="peers"></div>
     </div>
-    <div id="repl"></div>
-    <h3 id="peersTitle">Leader's view of its followers</h3>
-    <div id="peers"></div>
   </section>
 
-  <section class="card logs">
-    <h2 id="logTitle">Log</h2>
-    <div id="logTail"></div>
-  </section>
-
-  <section class="card feed">
-    <h2>Elections &amp; events</h2>
-    <div id="termStrip"></div>
+  <section class="card time" aria-labelledby="timeTitle">
+    <header><h2 id="timeTitle">Elections &amp; events</h2><span class="sub" id="evCount"></span></header>
+    <div id="ribbon" aria-label="Leaders by term"></div>
+    <div class="filters" id="filters" role="group" aria-label="Filter events"></div>
     <ul id="feed"></ul>
+    <div id="feedEmpty" hidden>Nothing here yet.</div>
+  </section>
+
+  <section class="card logs" aria-labelledby="logTitle">
+    <header><h2 id="logTitle">Log</h2><span class="sub" id="logSub"></span><div class="tabs" id="logTabs" role="tablist" aria-label="Choose a node"></div></header>
+    <div class="body"><div id="logTail"></div></div>
   </section>
 </main>
-<div id="toast"></div>
+<div id="toast" role="alert"></div>
 
 <script>
 (() => {
@@ -224,21 +392,41 @@ const $ = (id) => document.getElementById(id);
 const NS = 'http://www.w3.org/2000/svg';
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const pad = (n, w) => String(n).padStart(w, '0');
+const icon = (name) => `<svg class="i"><use href="#i-${name}"/></svg>`;
 
 const S = {
-  state: null,        // latest ClusterView
-  events: [],         // feed, ascending by seq
-  seen: new Set(),    // seq numbers already added
-  leaders: [],        // [{term, node}] from "leader" events
-  selLink: null,      // "a|b"
-  selNode: null,
+  state: null, online: false,
+  events: [], seen: new Set(), leaders: [],
+  selLink: null, selNode: null, logNode: null,
+  filter: 'all',
   feedVersion: 0, feedDrawn: -1,
+  samples: [], rates: [],     // throughput bookkeeping
 };
 
-// ---------------------------------------------------------------- transport
+/* ------------------------------------------------------------------ theme */
+function applyTheme(t) {
+  const root = document.documentElement;
+  if (t === 'light' || t === 'dark') root.setAttribute('data-theme', t); else root.removeAttribute('data-theme');
+  const dark = t === 'dark' || (t !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+  $('themeIcon').setAttribute('href', dark ? '#i-sun' : '#i-moon');
+}
+let theme = null;
+try { theme = localStorage.getItem('raftviz-theme'); } catch (e) { /* storage may be blocked */ }
+applyTheme(theme);
+$('themeBtn').onclick = () => {
+  const dark = document.documentElement.getAttribute('data-theme') === 'dark' ||
+    (!document.documentElement.getAttribute('data-theme') && matchMedia('(prefers-color-scheme: dark)').matches);
+  theme = dark ? 'light' : 'dark';
+  try { localStorage.setItem('raftviz-theme', theme); } catch (e) { /* ignore */ }
+  applyTheme(theme);
+};
+
+/* -------------------------------------------------------------- transport */
 function setConn(kind) {
-  $('conn').className = 'pill ' + kind;
-  $('connText').textContent = { live: 'live', down: 'disconnected, retrying…', connecting: 'connecting…' }[kind];
+  S.online = kind === 'live';
+  $('conn').className = 'conn ' + kind;
+  $('connText').textContent = { live: 'Live', down: 'Disconnected, retrying…', connecting: 'Connecting…' }[kind];
+  schedule();
 }
 
 function connect() {
@@ -248,14 +436,9 @@ function connect() {
   ws.onmessage = (m) => {
     let msg;
     try { msg = JSON.parse(m.data); } catch (e) { return; }
-    if (msg.type === 'hello') {
-      S.state = msg.state;
-      (msg.history || []).forEach(addEvent);
-    } else if (msg.type === 'state') {
-      S.state = msg.state;
-    } else if (msg.type === 'event') {
-      addEvent(msg.event);
-    }
+    if (msg.type === 'hello') { S.state = msg.state; sample(msg.state); (msg.history || []).forEach(addEvent); }
+    else if (msg.type === 'state') { S.state = msg.state; sample(msg.state); }
+    else if (msg.type === 'event') addEvent(msg.event);
     schedule();
   };
   ws.onclose = () => { setConn('down'); setTimeout(connect, 1000); };
@@ -271,23 +454,66 @@ async function api(path, body) {
     });
     if (!r.ok) {
       const j = await r.json().catch(() => ({}));
-      toast(j.error || r.statusText);
+      toast(j.error || r.statusText, true);
     }
   } catch (e) {
-    toast('request failed: ' + e.message);
+    toast('Request failed: ' + e.message, true);
   }
 }
 
 let toastTimer = 0;
-function toast(msg) {
+function toast(msg, isErr) {
   const t = $('toast');
   t.textContent = msg;
-  t.classList.add('on');
+  t.className = (isErr ? 'err ' : '') + 'on';
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('on'), 3500);
+  toastTimer = setTimeout(() => { t.className = isErr ? 'err' : ''; }, 3800);
 }
 
-// ------------------------------------------------------------------- events
+/* ------------------------------------------------------- derived metrics */
+const HUES = [212, 28, 152, 330, 48, 268, 186, 8, 100];
+const nodeColor = (id) => {
+  const ids = S.state ? S.state.nodes.map((n) => n.id) : [];
+  const i = Math.max(0, ids.indexOf(id));
+  return `hsl(${HUES[i % HUES.length]} 72% 58%)`;
+};
+
+// Committed writes per second, from the last ~1.5s of samples.
+function sample(st) {
+  S.samples.push({ t: st.atMs, w: st.writes });
+  if (S.samples.length > 15) S.samples.shift();
+  const a = S.samples[0], b = S.samples[S.samples.length - 1];
+  const dt = (b.t - a.t) / 1000;
+  const rate = dt > 0.3 ? Math.max(0, (b.w - a.w) / dt) : 0;
+  S.rate = rate;
+  S.rates.push(rate);
+  if (S.rates.length > 90) S.rates.shift();
+}
+
+const linkMap = (st) => { const m = {}; st.links.forEach((l) => { m[l.from + '>' + l.to] = l; }); return m; };
+
+function quorumInfo(st) {
+  const n = st.nodes.length, need = Math.floor(n / 2) + 1;
+  if (!st.leader) return { n, need, have: 0, ok: false, leader: null, members: [] };
+  const L = linkMap(st), members = [st.leader];
+  st.nodes.forEach((o) => {
+    if (o.id === st.leader) return;
+    const out = L[st.leader + '>' + o.id], back = L[o.id + '>' + st.leader];
+    if (out && back && !out.blocked && !back.blocked) members.push(o.id);
+  });
+  return { n, need, have: members.length, ok: members.length >= need, leader: st.leader, members };
+}
+
+function sparkline(vals, color) {
+  if (vals.length < 2) return '';
+  const w = 200, h = 46, max = Math.max(1, ...vals);
+  const pts = vals.map((v, i) => [(i / (vals.length - 1)) * w, h - 4 - (v / max) * (h - 10)]);
+  const line = pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ');
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">
+    <path d="${line} L${w} ${h} L0 ${h} Z" fill="${color}" opacity=".12"/><path d="${line}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>`;
+}
+
+/* ----------------------------------------------------------------- events */
 function addEvent(ev) {
   if (S.seen.has(ev.seq)) return;
   S.seen.add(ev.seq);
@@ -295,12 +521,12 @@ function addEvent(ev) {
   if (S.events.length > 250) S.events.shift();
   if (ev.kind === 'leader') {
     S.leaders.push({ term: ev.term, node: ev.node });
-    if (S.leaders.length > 8) S.leaders.shift();
+    if (S.leaders.length > 10) S.leaders.shift();
   }
   S.feedVersion++;
 }
 
-// --------------------------------------------------------------- rendering
+/* -------------------------------------------------------------- rendering */
 let queued = false;
 function schedule() {
   if (queued) return;
@@ -310,8 +536,10 @@ function schedule() {
 
 function render() {
   const st = S.state;
+  $('shell').classList.toggle('stale-data', !S.online && !!st);
   if (!st || !st.nodes.length) return;
-  renderStats(st);
+  renderBanner(st);
+  renderKpis(st);
   updateGraph(st);
   renderSelection(st);
   renderRepl(st);
@@ -321,31 +549,56 @@ function render() {
   syncControls(st);
 }
 
-const linkMap = (st) => { const m = {}; st.links.forEach((l) => { m[l.from + '>' + l.to] = l; }); return m; };
-
-function renderStats(st) {
-  const leader = st.nodes.find((n) => n.id === st.leader);
+function renderBanner(st) {
+  const b = $('banner');
   const leaders = st.nodes.filter((n) => n.state === 'Leader');
-  $('stats').innerHTML =
-    `<span>leader <b>${leader ? esc(leader.id) + ' (term ' + leader.term + ')' : 'none'}</b></span>` +
-    `<span>nodes <b>${st.nodes.length}</b></span>` +
-    `<span>writes committed <b>${st.writes}</b></span>` +
-    `<span>failed <b>${st.failed}</b></span>`;
-  const alert = $('alert');
-  if (leaders.length > 1) {
-    alert.textContent = 'SPLIT BRAIN: ' + leaders.map((n) => n.id + ' (term ' + n.term + ')').join(' and ') +
-      ' both believe they are leader. Only the highest term can commit.';
-    alert.classList.add('on');
+  const q = quorumInfo(st);
+  let kind = '', html = '';
+  if (!S.online) {
+    kind = 'bad'; html = `${icon('alert')}Connection to the dashboard lost <span>— showing the last known state while reconnecting.</span>`;
+  } else if (leaders.length > 1) {
+    kind = 'bad';
+    html = `${icon('alert')}Split brain: ${leaders.map((n) => `<b>${esc(n.id)}</b> (term ${n.term})`).join(' and ')} both believe they lead <span>— only the highest term can commit.</span>`;
   } else if (!leaders.length) {
-    alert.textContent = 'No leader: the cluster cannot accept writes until an election succeeds.';
-    alert.classList.add('on');
-  } else {
-    alert.classList.remove('on');
+    kind = 'warn'; html = `${icon('alert')}No leader <span>— the cluster cannot accept writes until an election succeeds.</span>`;
+  } else if (!q.ok) {
+    kind = 'warn'; html = `${icon('alert')}Leader <b>${esc(q.leader)}</b> has lost its quorum (${q.have} of ${q.n} reachable, ${q.need} needed) <span>— writes will stall.</span>`;
   }
+  b.className = kind ? 'on ' + kind : '';
+  // Icon first, then ONE text block: loose inline pieces would each become a flex item and fragment on narrow screens.
+  b.innerHTML = html ? html.replace('</svg>', '</svg><div>') + '</div>' : '';
 }
 
-// ---- network graph --------------------------------------------------------
-const NODE_R = 36, CX = 320, CY = 262, RING = 190;
+function renderKpis(st) {
+  const leader = st.nodes.find((n) => n.id === st.leader);
+  const q = quorumInfo(st);
+  const lead = [...S.events].reverse().find((e) => e.kind === 'leader' && e.node === st.leader);
+  const elected = lead ? ago(lead.atMs) : '';
+  const lag = leader ? Math.max(0, leader.lastLogIndex - leader.commitIndex) : 0;
+  const dots = st.nodes.map((n) => `<i class="${n.id === st.leader ? 'lead' : q.members.includes(n.id) ? 'on' : ''}" title="${esc(n.id)}"></i>`).join('');
+  const rate = S.rate || 0;
+  const tiles = [
+    `<div class="kpi ${leader ? 'lead' : 'warn'}"><div class="label">Leader</div>
+       <div class="val">${leader ? esc(leader.id) : 'None'}${leader ? `<small>term ${leader.term}</small>` : ''}</div>
+       <div class="note">${leader ? (elected ? 'elected ' + elected : 'in charge') : 'election in progress'}</div></div>`,
+    `<div class="kpi ${!leader ? 'warn' : q.ok ? 'good' : 'bad'}"><div class="label">Quorum</div>
+       <div class="val">${leader ? q.have : 0}<small>/ ${q.n} reachable</small></div>
+       <div class="note">${!leader ? 'no leader to measure' : q.ok ? 'majority of ' + q.need + ' available' : 'below the ' + q.need + ' needed'}</div>
+       <div class="qdots">${dots}</div></div>`,
+    `<div class="kpi"><div class="label">Throughput</div>
+       <div class="val">${rate < 10 ? rate.toFixed(1) : Math.round(rate)}<small>writes/s</small></div>
+       <div class="note">${st.writes} committed in total</div>${sparkline(S.rates, 'var(--accent)')}</div>`,
+    `<div class="kpi"><div class="label">Commit index</div>
+       <div class="val">${leader ? leader.commitIndex : '–'}</div>
+       <div class="note">${leader ? (lag ? lag + ' entries not yet committed' : 'fully committed') + ' · snapshot @' + leader.snapshotIndex : '—'}</div></div>`,
+    `<div class="kpi ${st.failed ? 'bad' : ''}"><div class="label">Failed writes</div>
+       <div class="val">${st.failed}</div><div class="note">timed out, overwritten or rejected</div></div>`,
+  ];
+  $('kpis').innerHTML = tiles.join('');
+}
+
+/* ------------------------------------------------------------- the graph */
+const NODE_R = 38, CX = 320, CY = 288, RING = 198;
 let geo = null;
 
 function mk(tag, attrs, parent) {
@@ -370,38 +623,45 @@ function buildGraph(ids) {
     const a = -Math.PI / 2 + (i * 2 * Math.PI) / ids.length;
     geo.pos[id] = { x: CX + RING * Math.cos(a), y: CY + RING * Math.sin(a) };
   });
+  const circ = 2 * Math.PI * (NODE_R + 6);
   for (let i = 0; i < ids.length; i++) {
     for (let j = i + 1; j < ids.length; j++) {
       const a = ids[i], b = ids[j], pa = geo.pos[a], pb = geo.pos[b];
       const dx = pb.x - pa.x, dy = pb.y - pa.y, len = Math.hypot(dx, dy), ux = dx / len, uy = dy / len;
-      const gap = NODE_R + 8;
+      const gap = NODE_R + 12;
       const x1 = pa.x + ux * gap, y1 = pa.y + uy * gap, x2 = pb.x - ux * gap, y2 = pb.y - uy * gap;
       const key = a + '|' + b;
       const g = mk('g', { class: 'edge ok' }, gEdges);
-      const wire = mk('line', { x1, y1, x2, y2, class: 'wire' }, g);
-      mk('line', { x1, y1, x2, y2, class: 'hit', 'data-pair': key }, g);
+      mk('line', { x1, y1, x2, y2, class: 'wire' }, g);
+      const hit = mk('line', { x1, y1, x2, y2, class: 'hit', 'data-pair': key, tabindex: 0, role: 'button', 'aria-label': 'Link between ' + a + ' and ' + b }, g);
       const arrAB = mk('polygon', { class: 'arrow', points: triangle(x1 + (x2 - x1) * 0.36, y1 + (y2 - y1) * 0.36, ux, uy) }, g);
       const arrBA = mk('polygon', { class: 'arrow', points: triangle(x1 + (x2 - x1) * 0.64, y1 + (y2 - y1) * 0.64, -ux, -uy) }, g);
-      const label = mk('text', { x: (x1 + x2) / 2, y: (y1 + y2) / 2 - 8, class: 'edge-label' }, g);
-      geo.edges[key] = { g, wire, arrAB, arrBA, label, a, b };
+      const label = mk('text', { x: (x1 + x2) / 2, y: (y1 + y2) / 2 - 9, class: 'edge-label halo-text' }, g);
+      geo.edges[key] = { g, hit, arrAB, arrBA, label, a, b };
     }
   }
   ids.forEach((id) => {
     const p = geo.pos[id];
-    const g = mk('g', { class: 'node follower', 'data-node': id, transform: 'translate(' + p.x + ',' + p.y + ')' }, gNodes);
-    mk('circle', { r: NODE_R + 8, class: 'halo' }, g);
+    const g = mk('g', { class: 'node follower', 'data-node': id, transform: 'translate(' + p.x + ',' + p.y + ')', tabindex: 0, role: 'button' }, gNodes);
+    mk('circle', { r: NODE_R + 11, class: 'halo' }, g);
+    mk('circle', { r: NODE_R + 6, class: 'track' }, g);
+    const ring = mk('circle', { r: NODE_R + 6, class: 'ring', 'stroke-dasharray': circ.toFixed(1), 'stroke-dashoffset': circ.toFixed(1) }, g);
     mk('circle', { r: NODE_R, class: 'body' }, g);
-    mk('text', { class: 'nid', y: -7 }, g).textContent = id;
-    const term = mk('text', { class: 'nterm', y: 10 }, g);
-    const role = mk('text', { class: 'nrole', y: 25 }, g);
-    const flag = mk('text', { class: 'nflag', y: NODE_R + 20 }, g); // below the circle: too long to fit inside
-    geo.nodes[id] = { g, term, role, flag };
+    mk('path', { class: 'crown', d: 'M-9 0L-7-10-2-4 0-12 2-4 7-10 9 0Z', transform: 'translate(0,' + (-NODE_R - 14) + ')' }, g);
+    mk('text', { class: 'nid', y: -1 }, g).textContent = id;
+    const role = mk('text', { class: 'nrole', y: 15 }, g);
+    mk('rect', { class: 'tpill', x: -27, y: NODE_R + 14, width: 54, height: 18, rx: 3 }, g);
+    const term = mk('text', { class: 'nterm', y: NODE_R + 27 }, g);
+    const flag = mk('text', { class: 'nflag', y: NODE_R + 48 }, g);
+    geo.nodes[id] = { g, ring, role, term, flag, circ };
   });
 }
 
 function updateGraph(st) {
   const ids = st.nodes.map((n) => n.id);
   if (!geo || geo.ids.join() !== ids.join()) buildGraph(ids);
+  $('topoEmpty').hidden = true;
+  $('net').removeAttribute('hidden'); // SVG elements have no .hidden property, only the attribute
   const L = linkMap(st);
 
   for (const key in geo.edges) {
@@ -421,6 +681,7 @@ function updateGraph(st) {
     if (drop > 0) parts.push(Math.round(drop * 100) + '% loss');
     if (lat > 0) parts.push(Math.round(lat) + ' ms');
     e.label.textContent = parts.join(' · ');
+    e.hit.setAttribute('aria-label', 'Link between ' + e.a + ' and ' + e.b + ': ' + (both ? 'severed' : any ? 'one direction cut' : degraded ? 'degraded' : 'healthy'));
   }
 
   st.nodes.forEach((n) => {
@@ -433,61 +694,77 @@ function updateGraph(st) {
     if (isolated) cls += ' isolated';
     if (S.selNode === n.id) cls += ' sel';
     g.g.setAttribute('class', cls);
-    g.term.textContent = 'term ' + n.term;
+    g.g.setAttribute('aria-label', n.id + ', ' + n.state.toLowerCase() + ', term ' + n.term + (stale ? ', stale leader' : '') + (isolated ? ', isolated' : ''));
     g.role.textContent = n.state.toUpperCase();
+    g.term.textContent = 'term ' + n.term;
     g.flag.textContent = [stale ? 'STALE LEADER' : '', isolated ? 'ISOLATED' : ''].filter(Boolean).join(' · ');
+    const frac = n.lastLogIndex > 0 ? Math.min(1, n.commitIndex / n.lastLogIndex) : 1;
+    g.ring.setAttribute('stroke-dashoffset', (g.circ * (1 - frac)).toFixed(1));
+    g.ring.style.stroke = frac < 0.999 ? 'var(--warn)' : 'var(--commit)';
   });
 }
 
-$('net').addEventListener('click', (ev) => {
-  const link = ev.target.closest('[data-pair]');
-  const node = ev.target.closest('[data-node]');
-  if (node) { S.selNode = node.getAttribute('data-node'); S.selLink = null; }
+function activate(target) {
+  const link = target.closest('[data-pair]');
+  const node = target.closest('[data-node]');
+  if (node) { S.selNode = node.getAttribute('data-node'); S.selLink = null; S.logNode = S.selNode; }
   else if (link) { S.selLink = link.getAttribute('data-pair'); S.selNode = null; }
   else { S.selLink = null; S.selNode = null; }
   schedule();
+}
+$('net').addEventListener('click', (ev) => activate(ev.target));
+$('net').addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); activate(ev.target); }
+  else if (ev.key === 'Escape') { S.selLink = null; S.selNode = null; schedule(); }
 });
 
-// ---- selection panel ------------------------------------------------------
-function dirStatus(l) {
-  if (!l) return '?';
-  if (l.blocked) return '<span class="bad-text">BLOCKED</span>';
+/* ------------------------------------------------------------- inspector */
+function dirTag(l) {
+  if (!l) return '<span class="tag">?</span>';
+  if (l.blocked) return '<span class="tag bad">Blocked</span>';
   const bits = [];
   if (l.dropRate > 0) bits.push(Math.round(l.dropRate * 100) + '% loss');
   if (l.maxLatencyMs > 0) bits.push(Math.round(l.minLatencyMs) + '–' + Math.round(l.maxLatencyMs) + ' ms');
-  return bits.length ? '<span class="warn-text">' + bits.join(', ') + '</span>' : '<span class="ok-text">open</span>';
+  return bits.length ? `<span class="tag warn">${bits.join(', ')}</span>` : '<span class="tag ok">Open</span>';
 }
 
 function renderSelection(st) {
   const L = linkMap(st);
-  let html;
+  let html, title = 'Inspector', sub = '';
   if (S.selLink) {
     const [a, b] = S.selLink.split('|');
-    html = `<h2>Link ${esc(a)} ↔ ${esc(b)}</h2>
-      <div class="kv"><span>${esc(a)} → ${esc(b)}</span><span>${dirStatus(L[a + '>' + b])}</span>
-      <span>${esc(b)} → ${esc(a)}</span><span>${dirStatus(L[b + '>' + a])}</span></div>
-      <div class="btns">
-        <button class="danger" data-act="sever" data-a="${esc(a)}" data-b="${esc(b)}" data-both="1">Sever Network Link</button>
-        <button data-act="sever" data-a="${esc(a)}" data-b="${esc(b)}">Cut ${esc(a)} → ${esc(b)} only</button>
-        <button data-act="sever" data-a="${esc(b)}" data-b="${esc(a)}">Cut ${esc(b)} → ${esc(a)} only</button>
-        <button class="good" data-act="restore" data-a="${esc(a)}" data-b="${esc(b)}" data-both="1">Restore link</button>
+    title = 'Link'; sub = `${a} ↔ ${b}`;
+    html = `<div class="dirs">
+        <div class="dir"><span>${esc(a)}<span class="arrowtxt">→</span>${esc(b)}</span>${dirTag(L[a + '>' + b])}</div>
+        <div class="dir"><span>${esc(b)}<span class="arrowtxt">→</span>${esc(a)}</span>${dirTag(L[b + '>' + a])}</div></div>
+      <div class="btns" style="margin-top:14px">
+        <button class="btn danger block" data-act="sever" data-a="${esc(a)}" data-b="${esc(b)}" data-both="1">${icon('cut')}Sever Network Link</button>
+        <button class="btn soft-danger" data-act="sever" data-a="${esc(a)}" data-b="${esc(b)}">Cut ${esc(a)} → ${esc(b)}</button>
+        <button class="btn soft-danger" data-act="sever" data-a="${esc(b)}" data-b="${esc(a)}">Cut ${esc(b)} → ${esc(a)}</button>
+        <button class="btn good block" data-act="restore" data-a="${esc(a)}" data-b="${esc(b)}" data-both="1">${icon('link')}Restore link</button>
       </div>
-      <div class="hint" style="margin-top:8px">Cutting one direction is an asymmetric fault: requests get through but replies are lost.</div>`;
+      <p class="hint" style="margin:12px 0 0">A one-way cut is an asymmetric fault: requests arrive and are executed, but the replies are lost.</p>`;
   } else if (S.selNode) {
     const n = st.nodes.find((x) => x.id === S.selNode);
-    html = `<h2>Node ${esc(S.selNode)}</h2>` + (n ? `<div class="kv">
-        <span>role</span><span><b>${esc(n.state)}</b></span>
-        <span>term</span><span>${n.term}</span>
-        <span>voted for</span><span>${esc(n.votedFor || '—')}</span>
-        <span>knows leader</span><span>${esc(n.leaderId || '—')}</span>
-        <span>keys stored</span><span>${n.keys}</span></div>` : '') + `
-      <div class="btns">
-        <button class="danger" data-act="isolate" data-a="${esc(S.selNode)}">Isolate node</button>
-        <button class="good" data-act="reconnect" data-a="${esc(S.selNode)}">Reconnect node</button>
+    title = 'Node'; sub = S.selNode;
+    html = (n ? `<div style="display:flex;gap:8px;align-items:center;margin-bottom:2px"><span class="tag ${n.state.toLowerCase()}">${esc(n.state)}</span><span class="tag">term ${n.term}</span></div>
+      <dl class="kv">
+        <dt>Voted for</dt><dd>${esc(n.votedFor || '—')}</dd>
+        <dt>Believes leader is</dt><dd>${esc(n.leaderId || '—')}</dd>
+        <dt>Last log index</dt><dd>${n.lastLogIndex}</dd>
+        <dt>Committed / applied</dt><dd>${n.commitIndex} / ${n.lastApplied}</dd>
+        <dt>Snapshot at</dt><dd>${n.snapshotIndex}</dd>
+        <dt>Keys stored</dt><dd>${n.keys}</dd></dl>` : '') + `
+      <div class="btns" style="margin-top:14px">
+        <button class="btn danger" data-act="isolate" data-a="${esc(S.selNode)}">${icon('bolt')}Isolate node</button>
+        <button class="btn good" data-act="reconnect" data-a="${esc(S.selNode)}">${icon('link')}Reconnect</button>
       </div>`;
   } else {
-    html = `<h2>Selection</h2><div class="hint">Click a <b>link</b> between two nodes to sever it, or a <b>node</b> to isolate it and inspect its log.</div>`;
+    html = `<div class="empty">${icon('touch')}<b style="color:var(--tx-2)">Nothing selected</b>
+      <span>Click a link to cut it, or a node to isolate it and inspect its log.</span></div>`;
   }
+  $('selTitle').textContent = title;
+  $('selSub').textContent = sub;
   const panel = $('selPanel');
   if (panel.dataset.html !== html) { panel.innerHTML = html; panel.dataset.html = html; }
 }
@@ -504,7 +781,7 @@ $('selPanel').addEventListener('click', (ev) => {
   }
 });
 
-// ---- replication bars -----------------------------------------------------
+/* ------------------------------------------------------------ replication */
 function ensureRows(container, ids, build) {
   const key = ids.join();
   if (container.dataset.key === key) return;
@@ -513,29 +790,28 @@ function ensureRows(container, ids, build) {
   ids.forEach((id) => container.appendChild(build(id)));
 }
 
-function bar(...segs) {
-  return '<div class="bar">' + segs.map((s) => `<div class="seg ${s}"></div>`).join('') + '</div>';
-}
+const barHtml = (...segs) => '<div class="bar">' + segs.map((s) => `<div class="seg-fill ${s}"></div>`).join('') + '</div>';
 
-function rowFor(id, barHtml) {
+function rowFor(id, bar) {
   const d = document.createElement('div');
   d.className = 'rrow';
   d.dataset.id = id;
-  d.innerHTML = `<div class="name">${esc(id)}<small></small></div>${barHtml}<div class="nums"></div>`;
+  d.innerHTML = `<div class="name"><b>${esc(id)}</b><span class="tag"></span></div><div>${bar}</div><div class="nums"></div>`;
   return d;
 }
 
 const pct = (v, max) => (max > 0 ? Math.min(100, (v / max) * 100) : 0).toFixed(2) + '%';
 function setSeg(row, cls, from, to, max) {
-  const s = row.querySelector('.seg.' + cls);
+  const s = row.querySelector('.seg-fill.' + cls);
   if (!s) return;
   s.style.left = pct(from, max);
   s.style.width = pct(Math.max(0, to - from), max);
 }
+const stat = (label, v) => `<span>${label} <b>${v}</b></span>`;
 
 function renderRepl(st) {
   const c = $('repl');
-  ensureRows(c, st.nodes.map((n) => n.id), (id) => rowFor(id, bar('snap', 'commit', 'unc')));
+  ensureRows(c, st.nodes.map((n) => n.id), (id) => rowFor(id, barHtml('snap', 'commit', 'unc')));
   const max = Math.max(1, ...st.nodes.map((n) => n.lastLogIndex));
   st.nodes.forEach((n) => {
     const row = c.querySelector('[data-id="' + n.id + '"]');
@@ -543,9 +819,13 @@ function renderRepl(st) {
     setSeg(row, 'snap', 0, n.snapshotIndex, max);
     setSeg(row, 'commit', n.snapshotIndex, n.commitIndex, max);
     setSeg(row, 'unc', Math.max(n.commitIndex, n.snapshotIndex), n.lastLogIndex, max);
-    row.querySelector('small').textContent = n.state.toUpperCase();
-    row.querySelector('.nums').textContent =
-      `last ${n.lastLogIndex} · committed ${n.commitIndex} · applied ${n.lastApplied} · snapshot ${n.snapshotIndex} · ${n.logEntries} in memory · ${n.keys} keys`;
+    const tag = row.querySelector('.tag');
+    tag.className = 'tag ' + n.state.toLowerCase();
+    tag.textContent = n.state;
+    row.querySelector('.bar').title = `${n.id}: last ${n.lastLogIndex}, committed ${n.commitIndex}, snapshot ${n.snapshotIndex}`;
+    row.querySelector('.nums').innerHTML =
+      stat('last', n.lastLogIndex) + stat('committed', n.commitIndex) + stat('applied', n.lastApplied) +
+      stat('snapshot', n.snapshotIndex) + stat('in memory', n.logEntries) + stat('keys', n.keys);
   });
 }
 
@@ -554,89 +834,140 @@ function renderPeers(st) {
   const leader = st.nodes.find((n) => n.id === st.leader);
   if (!leader || !leader.replication || !leader.replication.length) {
     c.dataset.key = '';
-    c.innerHTML = '<div class="hint">No leader to report on.</div>';
+    c.innerHTML = '<div class="empty" style="padding:10px">No leader to report on.</div>';
+    $('peersTitle').textContent = "Leader's view of its followers";
     return;
   }
-  $('peersTitle').textContent = `${leader.id}'s view of its followers (match = confirmed replicated)`;
-  const ids = leader.replication.map((p) => p.id);
-  ensureRows(c, ids, (id) => rowFor(id, bar('snap', 'match', 'next')));
+  $('peersTitle').textContent = `${leader.id}'s view of its followers`;
+  ensureRows(c, leader.replication.map((p) => p.id), (id) => rowFor(id, barHtml('snap', 'match', 'next')));
   const max = Math.max(1, leader.lastLogIndex);
   leader.replication.forEach((p) => {
     const row = c.querySelector('[data-id="' + p.id + '"]');
     if (!row) return;
     setSeg(row, 'snap', 0, Math.min(p.match, leader.snapshotIndex), max);
     setSeg(row, 'match', Math.min(p.match, leader.snapshotIndex), p.match, max);
-    const nx = row.querySelector('.seg.next');
-    nx.style.left = pct(Math.max(0, p.next - 1), max);
-    const behind = leader.lastLogIndex - p.match;
-    row.querySelector('small').textContent = 'FOLLOWER';
+    row.querySelector('.seg-fill.next').style.left = pct(Math.max(0, p.next - 1), max);
+    const behind = Math.max(0, leader.lastLogIndex - p.match);
+    const tag = row.querySelector('.tag');
+    tag.className = 'tag ' + (behind === 0 ? 'ok' : behind > 20 ? 'bad' : 'warn');
+    tag.textContent = behind === 0 ? 'In sync' : behind + ' behind';
+    row.querySelector('.bar').title = `${p.id}: match ${p.match} of ${leader.lastLogIndex}`;
     row.querySelector('.nums').innerHTML =
-      `match ${p.match} of ${leader.lastLogIndex} · ` + (behind > 0 ? `<b>${behind} behind</b>` : 'caught up') +
-      ` · next send #${p.next}` + (p.snapshotting ? ' <span class="badge snapping">installing snapshot</span>' : '');
+      stat('match', p.match) + stat('next send', '#' + p.next) +
+      (p.snapshotting ? '<span class="tag warn">installing snapshot</span>' : '');
   });
 }
 
-// ---- log tail -------------------------------------------------------------
+/* --------------------------------------------------------------- log tail */
 function renderLog(st) {
-  const id = S.selNode || st.leader || st.nodes[0].id;
-  const n = st.nodes.find((x) => x.id === id) || st.nodes[0];
-  $('logTitle').textContent = `Log of ${n.id} — newest ${n.tail.length} of ${n.lastLogIndex} entries` + (S.selNode ? '' : ' (click a node to switch)');
+  if (!S.logNode || !st.nodes.some((n) => n.id === S.logNode)) S.logNode = st.leader || st.nodes[0].id;
+  const n = st.nodes.find((x) => x.id === S.logNode) || st.nodes[0];
+
+  const tabs = st.nodes.map((x) =>
+    `<button class="tab" role="tab" data-log="${esc(x.id)}" aria-selected="${x.id === n.id}"><i class="${x.state.toLowerCase()}"></i>${esc(x.id)}</button>`).join('');
+  const tabsEl = $('logTabs');
+  if (tabsEl.dataset.html !== tabs) { tabsEl.innerHTML = tabs; tabsEl.dataset.html = tabs; }
+
+  $('logSub').textContent = `newest ${n.tail.length} of ${n.lastLogIndex} entries · dashed = not yet committed`;
   let html = '';
-  if (n.snapshotIndex > 0) html += `<span class="snapmark">⟦ snapshot through #${n.snapshotIndex} ⟧</span>`;
-  if (!n.tail.length) html += '<span class="hint">empty</span>';
+  if (n.snapshotIndex > 0) html += `<div class="snapmark">snapshot through #${n.snapshotIndex}</div>`;
+  if (!n.tail.length) html += '<span class="hint">This log is empty.</span>';
   n.tail.forEach((e) => {
     const hue = (e.term * 47) % 360;
-    html += `<span class="chip${e.committed ? '' : ' unc'}${e.noop ? ' noop' : ''}" style="border-left-color:hsl(${hue} 65% 52%)" title="term ${e.term}, ${e.committed ? 'committed' : 'NOT committed'}">#${e.index} <b>T${e.term}</b> ${esc(e.cmd)}</span>`;
+    html += `<div class="entry${e.committed ? '' : ' unc'}${e.noop ? ' noop' : ''}" style="--c:hsl(${hue} 65% 56%)" title="term ${e.term}, ${e.committed ? 'committed' : 'NOT committed'}">
+      <div class="ix"><span>#${e.index}</span><span>T${e.term}</span></div><div class="cmd">${esc(e.cmd)}</div></div>`;
   });
   const c = $('logTail');
   if (c.dataset.html !== html) { c.innerHTML = html; c.dataset.html = html; }
 }
+$('logTabs').addEventListener('click', (ev) => {
+  const b = ev.target.closest('[data-log]');
+  if (!b) return;
+  S.logNode = b.dataset.log;
+  schedule();
+});
 
-// ---- event feed -----------------------------------------------------------
+/* ------------------------------------------------------------------- feed */
+const KINDS = {
+  candidate: { c: 'var(--cand)', i: 'flag', g: 'elections', t: 'Started an election' },
+  leader: { c: 'var(--leader)', i: 'crown', g: 'elections', t: 'Became leader' },
+  follower: { c: 'var(--follower)', i: 'down', g: 'elections', t: 'Stepped down' },
+  vote: { c: 'var(--cand)', i: 'vote', g: 'elections', t: 'Granted a vote' },
+  chaos: { c: 'var(--bad)', i: 'bolt', g: 'chaos', t: 'Chaos' },
+  write: { c: 'var(--teal)', i: 'pen', g: 'writes', t: 'Writes' },
+  'write-ok': { c: 'var(--ok)', i: 'vote', g: 'writes', t: 'Write committed' },
+  'write-failed': { c: 'var(--bad)', i: 'alert', g: 'writes', t: 'Write failed' },
+  compact: { c: 'var(--grey)', i: 'camera', g: 'snapshots', t: 'Log compacted' },
+  'install-snapshot': { c: 'var(--warn)', i: 'camera', g: 'snapshots', t: 'Installed a snapshot' },
+};
+const FILTERS = [['all', 'All'], ['elections', 'Elections'], ['chaos', 'Chaos'], ['writes', 'Writes'], ['snapshots', 'Snapshots']];
+
 function clock(ms) {
   const d = new Date(ms);
   return pad(d.getHours(), 2) + ':' + pad(d.getMinutes(), 2) + ':' + pad(d.getSeconds(), 2) + '.' + pad(d.getMilliseconds(), 3);
+}
+function ago(ms) {
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  if (s < 1.5) return 'just now';
+  if (s < 60) return Math.floor(s) + 's ago';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  return clock(ms).slice(0, 8);
 }
 
 function renderFeed() {
   if (S.feedDrawn === S.feedVersion) return;
   S.feedDrawn = S.feedVersion;
-  $('termStrip').innerHTML = S.leaders.length
-    ? S.leaders.map((l) => `<span class="pill">term ${l.term} → ${esc(l.node)}</span>`).join('')
-    : '<span class="hint">no leader elected yet</span>';
+
+  $('filters').innerHTML = '<div class="seg-row">' + FILTERS.map(([k, label]) => `<button class="tab" data-filter="${k}" aria-selected="${S.filter === k}">${label}</button>`).join('') + '</div>';
+  $('ribbon').innerHTML = S.leaders.length
+    ? '<span class="hint" style="margin-right:2px">Leaders:</span>' + S.leaders.map((l) => `<span class="term-chip" style="--c:${nodeColor(l.node)}"><i></i>T${l.term} <span style="font-weight:500;color:var(--tx-2)">${esc(l.node)}</span></span>`).join('')
+    : '<span class="hint">No leader elected yet.</span>';
+
   const items = [];
   for (let i = S.events.length - 1; i >= 0 && items.length < 120; i--) {
-    const e = S.events[i];
-    items.push(`<li><time>${clock(e.atMs)}</time><span class="who">${esc(e.node || '·')}</span>` +
-      `<span class="msg"><span class="kind k-${esc(e.kind)}">${esc(e.kind)}</span>${e.term ? 'T' + e.term + ' ' : ''}${esc(e.detail)}</span></li>`);
+    const e = S.events[i], k = KINDS[e.kind] || { c: 'var(--follower)', i: 'flag', g: 'other', t: e.kind };
+    if (S.filter !== 'all' && k.g !== S.filter) continue;
+    items.push(`<li style="--k:${k.c}">
+      <div><div class="t1">${e.node ? `<span class="who" style="--c:${nodeColor(e.node)}"><i></i>${esc(e.node)}</span>` : ''}<span>${esc(k.t)}${e.term ? ' · T' + e.term : ''}</span></div>
+      <div class="t2">${esc(e.detail)}</div></div>
+      <time datetime="${new Date(e.atMs).toISOString()}" title="${clock(e.atMs)}" data-ms="${e.atMs}">${ago(e.atMs)}</time></li>`);
   }
   $('feed').innerHTML = items.join('');
+  $('feedEmpty').hidden = items.length > 0;
+  $('evCount').textContent = S.events.length + ' recorded';
 }
+$('filters').addEventListener('click', (ev) => {
+  const b = ev.target.closest('[data-filter]');
+  if (!b) return;
+  S.filter = b.dataset.filter;
+  S.feedDrawn = -1;
+  schedule();
+});
+setInterval(() => { // keep the relative timestamps honest without rebuilding the list
+  document.querySelectorAll('#feed time').forEach((t) => { t.textContent = ago(Number(t.dataset.ms)); });
+}, 1000);
 
-// ---- controls -------------------------------------------------------------
+/* --------------------------------------------------------------- controls */
 let lastTargets = '';
 function syncControls(st) {
   const ids = st.nodes.map((n) => n.id).join();
   if (ids !== lastTargets) {
     lastTargets = ids;
     const sel = $('sTarget'), cur = sel.value;
-    sel.innerHTML = '<option value="">current leader</option>' + st.nodes.map((n) => `<option value="${esc(n.id)}">${esc(n.id)}</option>`).join('');
+    sel.innerHTML = '<option value="">Current leader</option>' + st.nodes.map((n) => `<option value="${esc(n.id)}">${esc(n.id)}</option>`).join('');
     sel.value = cur;
   }
   const drop = Math.max(0, ...st.links.map((l) => l.dropRate));
   if (document.activeElement !== $('rDrop')) { $('rDrop').value = Math.round(drop * 100); $('vDrop').textContent = Math.round(drop * 100) + '%'; }
   const maxLat = Math.max(0, ...st.links.map((l) => l.maxLatencyMs)), minLat = Math.max(0, ...st.links.map((l) => l.minLatencyMs));
-  if (document.activeElement !== $('sLat')) {
-    const want = Math.round(minLat) + ',' + Math.round(maxLat);
-    const opt = [...$('sLat').options].find((o) => o.value === want);
-    if (opt) $('sLat').value = want;
-  }
+  const want = Math.round(minLat) + ',' + Math.round(maxLat);
+  document.querySelectorAll('#segLat button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.v === want)));
   if (document.activeElement !== $('rLoad')) { $('rLoad').value = st.load; $('vLoad').textContent = st.load ? st.load + '/s' : 'off'; }
 }
 
 $('bIsoLeader').onclick = () => {
   const leader = S.state && S.state.leader;
-  if (!leader) return toast('there is no leader to isolate');
+  if (!leader) return toast('There is no leader to isolate.', true);
   api('/api/nodes/isolate', { id: leader });
 };
 $('bSplit').onclick = () => {
@@ -649,12 +980,19 @@ $('bHeal').onclick = () => api('/api/chaos/heal');
 $('bReset').onclick = () => api('/api/chaos/reset');
 $('rDrop').oninput = () => { $('vDrop').textContent = $('rDrop').value + '%'; };
 $('rDrop').onchange = () => api('/api/chaos/drop', { rate: Number($('rDrop').value) / 100 });
-$('sLat').onchange = () => { const [mn, mx] = $('sLat').value.split(',').map(Number); api('/api/chaos/latency', { minMs: mn, maxMs: mx }); };
+$('segLat').addEventListener('click', (ev) => {
+  const b = ev.target.closest('button[data-v]');
+  if (!b) return;
+  const [mn, mx] = b.dataset.v.split(',').map(Number);
+  api('/api/chaos/latency', { minMs: mn, maxMs: mx });
+});
 $('bPut').onclick = () => api('/api/kv/put', { target: $('sTarget').value, key: $('iKey').value, value: $('iVal').value });
 $('bBurst').onclick = () => api('/api/kv/burst', { count: 50 });
 $('rLoad').oninput = () => { $('vLoad').textContent = Number($('rLoad').value) ? $('rLoad').value + '/s' : 'off'; };
 $('rLoad').onchange = () => api('/api/load', { rate: Number($('rLoad').value) });
+['iKey', 'iVal'].forEach((id) => $(id).addEventListener('keydown', (ev) => { if (ev.key === 'Enter') $('bPut').click(); }));
 
+renderSelection({ links: [], nodes: [] });
 connect();
 })();
 </script>
